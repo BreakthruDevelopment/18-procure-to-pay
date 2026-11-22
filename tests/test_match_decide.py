@@ -384,3 +384,56 @@ def test_a_currency_mismatch_blocks_without_the_percent_rule() -> None:
 def test_the_purchase_order_must_agree_with_the_invoice() -> None:
     with pytest.raises(InternalFailure, match="does not agree"):
         _decide(_draft(), _invoice(), None, ())
+
+
+def test_more_delivered_than_ordered_is_a_variance_even_when_billed_as_delivered() -> None:
+    """The third leg of the three-way match: what was ORDERED, not only what arrived.
+
+    The ordered quantity was read nowhere, so this case came back `match`, no variances,
+    high band, and staged — and the money the 5% rule measures was zero, because treating
+    the delivery as the authorization makes the invoice agree with itself. The identical
+    20% as a price rise was blocked, which is what made the gap visible.
+    """
+    order = _order(total=100_000, qty=100, unit_price=1_000)
+    outcome = _decide(
+        _draft(total=120_000, qty=120, unit_price=1_000),
+        _invoice(total=120_000, qty=120, unit_price=1_000),
+        order,
+        (_receipt(120),),
+    )
+    assert outcome.verdict is Verdict.VARIANCE
+    assert outcome.variances == (
+        VarianceItem(kind=VarianceKind.QUANTITY, line_no=1, expected=100, actual=120),
+    )
+    assert outcome.stage is False
+    assert outcome.needs_human is True
+    assert VARIANCE_OVER in outcome.blocking
+    assert "quantity" in outcome.fields_to_check
+
+
+def test_an_over_delivery_billed_only_up_to_the_order_is_clean() -> None:
+    """The other side of the same rule: 120 arrived, 100 ordered, 100 billed. Nothing is
+    wrong with the invoice, so it must not be forced — `min(ordered, received)` and not
+    `ordered` alone, or an under-delivery billed correctly would be a variance too."""
+    outcome = _decide(
+        _draft(total=100_000, qty=100, unit_price=1_000),
+        _invoice(total=100_000, qty=100, unit_price=1_000),
+        _order(total=100_000, qty=100, unit_price=1_000),
+        (_receipt(120),),
+    )
+    assert outcome.verdict is Verdict.MATCH
+    assert outcome.variances == ()
+    assert outcome.stage is True
+
+
+def test_an_under_delivery_billed_as_delivered_is_still_clean() -> None:
+    """80 ordered against 100, 80 arrived, 80 billed: paying for what arrived is correct."""
+    outcome = _decide(
+        _draft(total=80_000, qty=80, unit_price=1_000),
+        _invoice(total=80_000, qty=80, unit_price=1_000),
+        _order(total=100_000, qty=100, unit_price=1_000),
+        (_receipt(80),),
+    )
+    assert outcome.verdict is Verdict.MATCH
+    assert outcome.variances == ()
+    assert outcome.stage is True

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 
 import pytest
 from agent_container.core.budget import Budget
@@ -12,7 +13,7 @@ from agent_container.core.provider import ModelProvider
 from agent_container.core.replay import ReplayProvider
 
 from p2p.core.access import Principal
-from p2p.core.erp import Erp, InvoiceState
+from p2p.core.erp import Decision, Erp, Invoice, InvoiceState, StagedChangeRow
 from p2p.core.errors import AccessDenied, TransientFailure, ValidationFailed
 from p2p.match.commands import run_match
 from p2p.match.schema import (
@@ -522,3 +523,82 @@ def test_exactly_0_9_is_one_click_and_0_59_is_not(erp: Erp, clerk: Principal) ->
     assert low.band is Band.LOW
     assert low.change_key is None
     assert LOW_CONFIDENCE in low.why
+
+
+def test_a_match_resumes_from_matched_when_nothing_was_staged(erp: Erp, clerk: Principal) -> None:
+    """A lock taken between the `extracted -> matched` commit and the staging call left the
+    invoice `matched` with no posting, and `p2p match` is the only path that stages one — so
+    refusing the retry left the invoice unpostable for ever and needing the database edited by
+    hand. `advance_invoice` is a no-op for `matched -> matched`, so resuming is safe.
+    """
+    prepare(erp, clerk, "INV-1001")
+    erp.advance_invoice(clerk, "INV-1001", InvoiceState.MATCHED)
+    assert erp.list_staged(clerk) == ()
+    _provider, result = _run(erp, clerk, "INV-1001", *po_replies("PO-1001", "SUP-1001"))
+    assert result.state is InvoiceState.STAGED
+    assert result.change_key is not None
+    assert erp.get_invoice(clerk, "INV-1001").state is InvoiceState.STAGED
+
+
+def test_a_rejected_posting_can_be_matched_again(
+    erp: Erp, clerk: Principal, approver: Principal
+) -> None:
+    """The transition table has `staged -> matched` on rejection precisely so the invoice can
+    be staged again, and this command is the only thing that stages. Refusing every state but
+    `extracted` made that transition's stated purpose unreachable."""
+    prepare(erp, clerk, "INV-1001")
+    _first_provider, first = _run(erp, clerk, "INV-1001", *po_replies("PO-1001", "SUP-1001"))
+    assert first.change_key is not None
+    erp.apply_change(approver, first.change_key, Decision.rejected("wrong cost centre"))
+    assert erp.get_invoice(clerk, "INV-1001").state is InvoiceState.MATCHED
+    assert erp.list_staged(clerk) == ()
+    _second_provider, second = _run(erp, clerk, "INV-1001", *po_replies("PO-1001", "SUP-1001"))
+    assert second.state is InvoiceState.STAGED
+    assert second.change_key is not None
+    assert second.change_key != first.change_key
+
+
+def test_a_staged_invoice_is_still_refused(erp: Erp, clerk: Principal) -> None:
+    """Resuming is only for `matched`. An invoice with a posting awaiting a decision must not
+    get a second one, and `already advanced` still means what 18.7's `already_advanced` needs."""
+    prepare(erp, clerk, "INV-1001")
+    _provider, result = _run(erp, clerk, "INV-1001", *po_replies("PO-1001", "SUP-1001"))
+    assert result.state is InvoiceState.STAGED
+    with pytest.raises(ValidationFailed, match="already advanced"):
+        _run(erp, clerk, "INV-1001", *po_replies("PO-1001", "SUP-1001"))
+
+
+def test_the_staged_key_is_reported_without_reading_the_invoice_again(
+    erp: Erp, clerk: Principal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stage_posting` moves the invoice inside the transaction that records the row, so the
+    result is known without another read. A read there could be blocked and raise
+    `TransientFailure` on a posting that had already committed: the command reported failure,
+    never printed the `change_key` its last line is meant to carry, and the retry was refused.
+    """
+    prepare(erp, clerk, "INV-1001")
+    real = Erp.get_invoice
+    staged_yet = {"done": False}
+
+    def guarded(self: Erp, principal: Principal, invoice_id: str) -> Invoice:
+        if staged_yet["done"]:
+            raise TransientFailure("the ERP was busy")
+        return real(self, principal, invoice_id)
+
+    real_stage = Erp.stage_posting
+
+    def watched(
+        self: Erp, principal: Principal, invoice_id: str, payload: Mapping[str, object]
+    ) -> StagedChangeRow:
+        row = real_stage(self, principal, invoice_id, payload)
+        staged_yet["done"] = True
+        return row
+
+    monkeypatch.setattr(Erp, "get_invoice", guarded)
+    monkeypatch.setattr(Erp, "stage_posting", watched)
+    _provider, result = _run(erp, clerk, "INV-1001", *po_replies("PO-1001", "SUP-1001"))
+    assert result.change_key is not None
+    assert result.state is InvoiceState.STAGED
+    assert result.invoice_id == "INV-1001"
+    monkeypatch.undo()
+    assert erp.get_invoice(clerk, "INV-1001").state is InvoiceState.STAGED

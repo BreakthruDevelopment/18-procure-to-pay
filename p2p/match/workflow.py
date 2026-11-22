@@ -98,6 +98,25 @@ class MatchResult:
     calls: tuple[tuple[str, str], ...]
 
 
+def _resumable(invoice: Invoice) -> bool:
+    """Whether `p2p match` may run for this invoice: `extracted`, or `matched`.
+
+    `matched` is resumable for two reasons, and neither was reachable before. A lock taken
+    between the `extracted -> matched` commit and the staging call left the invoice `matched`
+    with nothing staged, and because this command is the only path that stages a posting,
+    refusing the retry left it unpostable for ever and needing the database edited by hand.
+    And the transition table has `staged -> matched` on rejection precisely "so it can be
+    staged again" — which nothing could do while every state but `extracted` was refused.
+
+    `matched` never has an undecided posting to collide with, so no extra check is needed:
+    `stage_posting` is the only writer of one and it moves the invoice to `staged` in the same
+    transaction, and a rejected posting is decided. `advance_invoice` is a no-op for
+    `matched -> matched`, so a resumed run advances nothing twice. `staged` and `posted` are
+    still refused, which is the `already advanced` that 18.7's `already_advanced` relies on.
+    """
+    return invoice.state in {InvoiceState.EXTRACTED, InvoiceState.MATCHED}
+
+
 async def match_invoice(
     erp: Erp,
     principal: Principal,
@@ -111,7 +130,7 @@ async def match_invoice(
     invoice = erp.get_invoice(principal, invoice_id)
     if invoice.state is InvoiceState.RECEIVED:
         raise ValidationFailed("the invoice has not been extracted")
-    if invoice.state is not InvoiceState.EXTRACTED:
+    if not _resumable(invoice):
         raise ValidationFailed("the invoice is already advanced")
     draft = _load_draft(erp, principal, invoice.id)
     supplier = erp.get_supplier(principal, invoice.supplier_id)
@@ -195,13 +214,19 @@ async def match_invoice(
 
     updated = erp.advance_invoice(principal, invoice.id, InvoiceState.MATCHED)
     change_key: str | None = None
+    state = updated.state
     if stage:
         change_key = await _stage(session, invoice, code, why=why, needs_human=needs_human)
         calls.append(("post_invoice", invoice.id))
-        updated = erp.get_invoice(principal, invoice.id)
+        # Not re-read: `stage_posting` moves the invoice to `staged` inside the same
+        # transaction that records the row, so this is known without another call. A read
+        # here could be blocked and raise `TransientFailure` on a posting that had already
+        # committed, which reported failure, never printed the `change_key` the command's
+        # last line is meant to carry, and invited a retry that is then refused.
+        state = InvoiceState.STAGED
     return MatchResult(
-        invoice_id=updated.id,
-        state=updated.state,
+        invoice_id=invoice.id,
+        state=state,
         verdict=code.verdict,
         confidence=code.confidence,
         band=code.band,

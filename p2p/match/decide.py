@@ -204,11 +204,17 @@ def _line_facts(
 ) -> tuple[tuple[VarianceItem, ...], int]:
     """Variances, and the absolute money those lines differ by, in minor units.
 
-    Quantity is the invoice quantity against the goods receipt (expected is what was
-    received). Price is the invoice unit price against the purchase order. The money
-    is the invoiced extension against the received quantity at the order's price, which
-    is what "over 5% of the PO total" is measured on. A line the order does not have
-    is a quantity variance against nothing ordered.
+    Quantity is the invoice quantity against what the order AUTHORIZED and the receipt
+    CONFIRMED — the lesser of the two, because a delivery larger than the order does not
+    authorize itself. Comparing the invoice only against the receipt left the ordered
+    quantity read nowhere, so an over-delivery billed in full passed clean: 100 ordered,
+    120 received, 120 invoiced came back `match`, no variances, high band, and staged,
+    while the identical 20% as a price rise was blocked. It also made the money zero,
+    because `got * price` treats delivery as authorization, so the 5% rule had nothing to
+    measure. Price is the invoice unit price against the purchase order. The money is the
+    invoiced extension against the authorized quantity at the order's price, which is what
+    "over 5% of the PO total" is measured on. A line the order does not have is a quantity
+    variance against nothing ordered.
     """
     po_lines = {line.line_no: line for line in order.lines}
     received: dict[int, int] = {}
@@ -219,16 +225,19 @@ def _line_facts(
     for line in invoice.lines:
         po_line = po_lines.get(line.line_no)
         got = received.get(line.line_no, 0)
+        ordered = po_line.qty if po_line is not None else 0
         price = po_line.unit_price if po_line is not None else 0
-        supported = got * price
+        # Both legs: what was ordered and what arrived. Neither alone authorizes a payment.
+        authorized = min(ordered, got)
+        supported = authorized * price
         invoiced = line.qty * line.unit_price + line.tax
         amount += abs(invoiced - supported)
-        if po_line is None or line.qty != got:
+        if po_line is None or line.qty != authorized:
             items.append(
                 VarianceItem(
                     kind=VarianceKind.QUANTITY,
                     line_no=line.line_no,
-                    expected=0 if po_line is None else got,
+                    expected=0 if po_line is None else authorized,
                     actual=line.qty,
                 )
             )
@@ -243,7 +252,7 @@ def _line_facts(
             )
         elif (
             po_line is not None
-            and line.qty == got
+            and line.qty == authorized
             and line.unit_price == po_line.unit_price
             and line.tax != 0
         ):

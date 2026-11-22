@@ -7,13 +7,17 @@ from collections.abc import Sequence
 
 from p2p import __version__
 from p2p.disputes.commands import add_parser as add_dispute_parser
+from p2p.extract.ingest import add_parser as add_ingest_parser
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="p2p", description="Procure-to-pay.")
     parser.add_argument("--version", action="version", version=f"p2p {__version__}")
     subparsers = parser.add_subparsers(dest="command")
+    # Both, and in one place: 18.4 and 18.6 each rewrote this function for their own
+    # subcommand, so a resolution keeping either side alone silently deletes the other's.
     add_dispute_parser(subparsers)
+    add_ingest_parser(subparsers)
     return parser
 
 

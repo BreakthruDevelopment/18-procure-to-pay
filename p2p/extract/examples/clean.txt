@@ -1,0 +1,13 @@
+NORTHWIND FASTENERS
+Accounts receivable
+Invoice No. 1001-A
+Invoice date: 2026-11-08
+Purchase order: PO-1001
+
+Bill to: Company 1000 AP
+
+Qty  Description              Unit price    Amount
+100  M8 hex bolts, zinc       12.50         1,250.00
+
+                         Total USD          1,250.00
+Terms: NET30

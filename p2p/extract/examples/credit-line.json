@@ -1,0 +1,34 @@
+{
+  "supplier_name": "Calder Industrial",
+  "po_ref": "PO-1999",
+  "number": "1999-C",
+  "date": "2026-11-09",
+  "currency": "USD",
+  "total": 485000,
+  "lines": [
+    {
+      "line_no": 1,
+      "description": "Gearbox assembly, 4:1",
+      "qty": 10,
+      "unit_price": 50000,
+      "tax": 0
+    },
+    {
+      "line_no": 2,
+      "description": "Credit: freight overcharge",
+      "qty": 1,
+      "unit_price": -15000,
+      "tax": 0
+    }
+  ],
+  "confidence": {
+    "supplier_name": 0.98,
+    "po_ref": 0.97,
+    "number": 0.99,
+    "date": 0.99,
+    "currency": 0.99,
+    "total": 0.97,
+    "lines": 0.96
+  },
+  "unreadable": []
+}

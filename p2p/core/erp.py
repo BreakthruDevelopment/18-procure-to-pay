@@ -401,6 +401,11 @@ TRANSITIONS: Final[frozenset[tuple[InvoiceState, InvoiceState]]] = (
 
 #: Reads are capped and paged (statement 2.1). A caller may ask for less, never for more.
 MAX_PAGE: Final = 100
+
+#: `case_event.kind` values this module answers case-wide questions about. The column is free
+#: text, so these are the names the two accessors below and their callers must agree on.
+CASE_EVENT_QUESTION: Final = "question"
+CASE_EVENT_READ: Final = "read"
 DEFAULT_PAGE: Final = 50
 #: The spec's context window for a case: the rolling summary plus the last 10 events.
 DEFAULT_CASE_EVENTS: Final = 10
@@ -1157,6 +1162,55 @@ class Erp:
                 recorded_at=_text(row, "recorded_at"),
             )
             for row in reversed(rows)
+        )
+
+    def case_has_question(self, principal: Principal, case_id: str) -> bool:
+        """Whether this case has ever asked its one clarifying question.
+
+        Case-wide, not window-wide, and that is the whole point of it being here. A caller can
+        only reach a case's events through `list_case_events`, which returns the newest rows and
+        clamps `limit` to `MAX_PAGE`, so a caller deriving this from events got it wrong the
+        moment a case passed a hundred of them: the answer went back to "no", and the disputes
+        desk asked a second clarifying question, which the spec allows exactly one of. It cannot
+        be fixed in the caller — a larger `limit` silently still returns a hundred — so the fact
+        is answered in SQL over the whole case, where no window applies.
+
+        Scoped the same way as every other by-id read: the `company_code` and, for a disputes
+        agent, the assignee predicate are in `_case_row`, so a case in another company code and a
+        case that does not exist take the same path and get the same message.
+        """
+        case_row = self._case_row(principal, case_id)
+        assert_can(principal, Action.READ_CASE, _owner(case_row))
+        found = self._row(
+            "SELECT 1 AS present FROM case_event WHERE case_id = ? AND kind = ? LIMIT 1",
+            (case_id, CASE_EVENT_QUESTION),
+        )
+        return found is not None
+
+    def case_read_digests(self, principal: Principal, case_id: str) -> frozenset[tuple[str, str]]:
+        """Every `(tool, digest)` a read on this case has already returned, case-wide.
+
+        The companion to `case_has_question`, and bounded by the same reasoning: the set behind
+        "did this step learn anything new" lost its older entries past `MAX_PAGE` events, so a
+        repeat read counted as new facts and the written criterion "the case has looped twice
+        without new facts" could stop firing. `DISTINCT` keeps the result proportional to what a
+        case has actually read rather than to how many times it read it.
+
+        A row whose payload carries neither key is not a read this method can speak for and is
+        left out, rather than entering the set as a pair of nulls that would collide.
+        """
+        case_row = self._case_row(principal, case_id)
+        assert_can(principal, Action.READ_CASE, _owner(case_row))
+        rows = self._rows(
+            "SELECT DISTINCT json_extract(payload_json, '$.tool') AS tool,"
+            " json_extract(payload_json, '$.digest') AS digest"
+            " FROM case_event WHERE case_id = ? AND kind = ?",
+            (case_id, CASE_EVENT_READ),
+        )
+        return frozenset(
+            (row["tool"], row["digest"])
+            for row in rows
+            if isinstance(row["tool"], str) and isinstance(row["digest"], str)
         )
 
     def get_batch_run(self, principal: Principal, run_id: str) -> BatchRun:
@@ -1959,6 +2013,8 @@ def _str_field(raw: Mapping[str, object], key: str) -> str:
 
 
 __all__: Sequence[str] = (
+    "CASE_EVENT_QUESTION",
+    "CASE_EVENT_READ",
     "DEFAULT_BUSY_TIMEOUT_MS",
     "DEFAULT_CASE_EVENTS",
     "KEY_PREFIX",

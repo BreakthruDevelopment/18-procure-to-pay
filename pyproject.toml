@@ -8,6 +8,10 @@ dependencies = [
     # App 17 (the agent container) is pinned by git TAG, never a branch or a bare commit. v0.1.0 is an annotated tag
     # on 9955f1f. A slice that needs something later than this tag stops and comments on its issue.
     "agent-container",
+    # Declared directly because this repo imports it (tool input models, and the pydantic output
+    # schemas the AI slices add), not only through app 17. An undeclared transitive import is a
+    # dependency that disappears the day the library above drops it.
+    "pydantic>=2.9",
 ]
 
 [project.scripts]
@@ -30,6 +34,17 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["p2p"]
+
+# `erp/` is not a Python package, so an installed wheel has no repo root to read the schema and the
+# seed from. Both are force-included at `p2p/_sql/`, where `p2p.core.erp` finds them through
+# `importlib.resources`; the repo copy stays the source of truth and the fallback for a source
+# checkout, and a test asserts the two are byte-identical when both exist.
+[tool.hatch.build.targets.wheel.force-include]
+"erp/schema.sql" = "p2p/_sql/schema.sql"
+"erp/seed.sql" = "p2p/_sql/seed.sql"
+
+[tool.hatch.build.targets.sdist]
+include = ["p2p", "erp", "tests", "README.md", "pyproject.toml", "uv.lock"]
 
 [tool.ruff]
 line-length = 100

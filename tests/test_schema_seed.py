@@ -214,12 +214,18 @@ def test_a_half_written_decision_cannot_exist(raw: sqlite3.Connection) -> None:
         raw.execute("UPDATE posting SET decision = 'applied' WHERE id = 'pst_000001'")
 
 
-def test_the_packaged_sql_matches_the_repo_copy_when_both_exist() -> None:
+def test_the_sql_resolves_from_somewhere_and_the_two_copies_agree() -> None:
+    """Both halves matter, and the first is what makes this test say something in a checkout.
+
+    A source checkout has only `erp/`; an installed wheel has only `p2p/_sql/`. Asserting the
+    comparison alone passed vacuously in both, which is no test at all -- so assert first that the
+    SQL resolves, then compare the copies wherever both are present.
+    """
     for name in ("schema.sql", "seed.sql"):
         packaged, repo = packaged_sql_path(name), repo_sql_path(name)
-        if packaged is None or repo is None:
-            continue
-        assert packaged.read_bytes() == repo.read_bytes(), name
+        assert packaged is not None or repo is not None, name
+        if packaged is not None and repo is not None:
+            assert packaged.read_bytes() == repo.read_bytes(), name
 
 
 def test_the_sql_the_app_would_apply_is_readable() -> None:

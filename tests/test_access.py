@@ -73,6 +73,12 @@ def test_rule_two_leaks_neither_company_code_into_the_message() -> None:
     assert "1000" not in str(refused.value)
 
 
+def test_rule_two_fails_closed_on_a_row_that_carries_no_company_code() -> None:
+    clerk = Principal("clerk@demo", Role.CLERK, "1000")
+    with pytest.raises(AccessDenied, match="carries no company code"):
+        assert_can(clerk, Action.READ_INVOICE, {"staged_by": "clerk@demo"})
+
+
 def test_rule_three_a_disputes_principal_sees_only_its_own_cases() -> None:
     mine = Principal("disputes@demo", Role.DISPUTES, "1000")
     row = {"company_code": "1000", "assigned_to": "disputes2@demo"}

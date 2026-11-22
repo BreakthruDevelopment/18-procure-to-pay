@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from p2p.core.access import Action, Principal, Role, assert_can
-from p2p.core.errors import AccessDenied, InternalFailure, ValidationFailed
+from p2p.core.errors import AccessDenied, InternalFailure, TransientFailure, ValidationFailed
 
 # ------------------------------------------------------------------------------------------------
 # Where the SQL lives
@@ -458,15 +458,6 @@ def _number(row: sqlite3.Row, column: str) -> int:
     return value
 
 
-def _opt_number(row: sqlite3.Row, column: str) -> int | None:
-    value = row[column]
-    if value is None:
-        return None
-    if not isinstance(value, int):
-        raise InternalFailure(f"column {column!r} should hold an integer or nothing")
-    return value
-
-
 def _opt_real(row: sqlite3.Row, column: str) -> float | None:
     value = row[column]
     if value is None:
@@ -512,6 +503,18 @@ def _clean_text(value: str, field: str, *, cap: int) -> str:
     return text[:cap]
 
 
+#: ISO-4217-shaped: three ASCII letters. `_clean_text(..., cap=3)` would have turned "euro" into
+#: "eur" and stored it, which is a silently wrong currency on a money row.
+_CURRENCY_PATTERN: Final = re.compile(r"\A[A-Za-z]{3}\Z")
+
+
+def _currency(value: str) -> str:
+    text = value.strip()
+    if not _CURRENCY_PATTERN.match(text):
+        raise ValidationFailed("currency must be a three-letter code")
+    return text.upper()
+
+
 def _page(limit: int | None, offset: int) -> tuple[int, int]:
     if offset < 0:
         raise ValidationFailed("offset may not be negative")
@@ -539,7 +542,7 @@ class _StagedSql:
 
 _STAGED_SQL: Final[Mapping[ChangeKind, _StagedSql]] = {
     ChangeKind.POSTING: _StagedSql(
-        by_key="SELECT * FROM posting WHERE id = ?",
+        by_key="SELECT * FROM posting WHERE id = ? AND company_code = ?",
         undecided="SELECT * FROM posting WHERE company_code = ? AND decision IS NULL ORDER BY seq",
         decide="UPDATE posting SET decision = ?, decided_by = ?, applied_at = ? WHERE id = ?",
         next_seq="SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM posting",
@@ -549,7 +552,7 @@ _STAGED_SQL: Final[Mapping[ChangeKind, _StagedSql]] = {
         ),
     ),
     ChangeKind.CREDIT_MEMO: _StagedSql(
-        by_key="SELECT * FROM credit_memo WHERE id = ?",
+        by_key="SELECT * FROM credit_memo WHERE id = ? AND company_code = ?",
         undecided=(
             "SELECT * FROM credit_memo WHERE company_code = ? AND decision IS NULL ORDER BY seq"
         ),
@@ -561,7 +564,7 @@ _STAGED_SQL: Final[Mapping[ChangeKind, _StagedSql]] = {
         ),
     ),
     ChangeKind.PAYMENT_HOLD: _StagedSql(
-        by_key="SELECT * FROM payment_hold WHERE id = ?",
+        by_key="SELECT * FROM payment_hold WHERE id = ? AND company_code = ?",
         undecided=(
             "SELECT * FROM payment_hold WHERE company_code = ? AND decision IS NULL ORDER BY seq"
         ),
@@ -669,13 +672,26 @@ class Erp:
 
     @contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
+        """One `BEGIN IMMEDIATE` transaction. Every read a write depends on belongs inside it.
+
+        `BEGIN IMMEDIATE` takes the write lock up front, so a check made inside the block still
+        holds when the block's own UPDATE runs. A check made *before* the block does not: two
+        connections can both read `matched`, serialize, and the second never looks again. Each write
+        accessor below therefore does its read, its `assert_can` and its validation in here, and its
+        UPDATEs carry the state they expect as a predicate with the affected-row count checked --
+        belt as well as braces, because the predicate is what makes the invariant local to the SQL.
+
+        `COMMIT` is inside the `try`: a commit that fails leaves a transaction open, and the caller
+        would be handed the failure with the lock still held.
+        """
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             yield self._conn
+            self._conn.execute("COMMIT")
         except BaseException:
-            self._conn.execute("ROLLBACK")
+            if self._conn.in_transaction:
+                self._conn.execute("ROLLBACK")
             raise
-        self._conn.execute("COMMIT")
 
     def _now(self) -> str:
         return _stamp(self._clock())
@@ -697,8 +713,14 @@ class Erp:
         return tuple(self._supplier(principal, row) for row in rows)
 
     def get_supplier(self, principal: Principal, supplier_id: str) -> Supplier:
-        row = self._one("SELECT * FROM supplier WHERE id = ?", supplier_id, "supplier")
-        return self._supplier(principal, row)
+        return self._supplier(principal, self._supplier_row(principal, supplier_id))
+
+    def _supplier_row(self, principal: Principal, supplier_id: str) -> sqlite3.Row:
+        return self._one(
+            "SELECT * FROM supplier WHERE id = ? AND company_code = ?",
+            (supplier_id, principal.company_code),
+            "supplier",
+        )
 
     def _supplier(self, principal: Principal, row: sqlite3.Row) -> Supplier:
         assert_can(principal, Action.READ_SUPPLIER, _owner(row))
@@ -711,7 +733,11 @@ class Erp:
         )
 
     def get_purchase_order(self, principal: Principal, po_id: str) -> PurchaseOrder:
-        row = self._one("SELECT * FROM purchase_order WHERE id = ?", po_id, "purchase order")
+        row = self._one(
+            "SELECT * FROM purchase_order WHERE id = ? AND company_code = ?",
+            (po_id, principal.company_code),
+            "purchase order",
+        )
         assert_can(principal, Action.READ_PURCHASE_ORDER, _owner(row))
         lines = []
         for raw in _array_json(row, "lines"):
@@ -765,8 +791,55 @@ class Erp:
         return tuple(receipts)
 
     def get_invoice(self, principal: Principal, invoice_id: str) -> Invoice:
-        row = self._one("SELECT * FROM invoice WHERE id = ?", invoice_id, "invoice")
-        return self._invoice(principal, row)
+        return self._invoice(principal, self._invoice_row(principal, invoice_id))
+
+    def _invoice_row(self, principal: Principal, invoice_id: str) -> sqlite3.Row:
+        return self._one(
+            "SELECT * FROM invoice WHERE id = ? AND company_code = ?",
+            (invoice_id, principal.company_code),
+            "invoice",
+        )
+
+    def find_invoices_by_number(
+        self,
+        principal: Principal,
+        number: str,
+        *,
+        supplier_id: str | None = None,
+        limit: int | None = None,
+    ) -> tuple[Invoice, ...]:
+        """Invoices in the principal's company code carrying this invoice number.
+
+        The seed owns the invoices, and `p2p ingest` refuses a document with no matching `invoice`
+        row rather than inserting one -- so something has to turn what an `InvoiceDraft` carries
+        into the row it belongs to, and a draft carries a supplier, a PO reference and a *number*,
+        never an `invoice.id`. Without this accessor slice 18.4 would have nothing to look the row
+        up with, and `p2p/core/erp.py` is a foundation path it may not edit.
+
+        It returns **every** state, including `posted` and `held`, which `list_open_invoices` by
+        definition does not: re-ingesting an invoice a previous run advanced has to report
+        `already advanced` naming the current state, and an accessor that could not see a posted
+        invoice would make that document `failed` instead.
+
+        It returns a tuple rather than one row because two invoices can carry one number: that is
+        the duplicate-invoice-number condition slice 18.5 must force to `needs_human`, and an
+        accessor that returned the first match would hide exactly the case it is needed for.
+        """
+        assert_can(principal, Action.READ_INVOICE)
+        wanted = _clean_text(number, "number", cap=100)
+        size, _ = _page(limit, 0)
+        if supplier_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM invoice WHERE company_code = ? AND number = ? ORDER BY id LIMIT ?",
+                (principal.company_code, wanted, size),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM invoice WHERE company_code = ? AND number = ? AND supplier_id = ?"
+                " ORDER BY id LIMIT ?",
+                (principal.company_code, wanted, supplier_id, size),
+            ).fetchall()
+        return tuple(self._invoice(principal, row) for row in rows)
 
     def list_open_invoices(
         self, principal: Principal, *, limit: int | None = None, offset: int = 0
@@ -819,8 +892,9 @@ class Erp:
         `held` is terminal in this build: there is no `release_payment` tool and no transition out
         of it, so a held invoice reports `held` for ever.
         """
-        row = self._one("SELECT * FROM invoice WHERE id = ?", invoice_id, "invoice")
+        row = self._invoice_row(principal, invoice_id)
         assert_can(principal, Action.READ_PAYMENT_STATUS, _owner(row))
+        currency = _text(row, "currency")
         applied_posting = self._conn.execute(
             "SELECT id FROM posting WHERE invoice_id = ? AND decision = ? ORDER BY seq LIMIT 1",
             (invoice_id, DecisionKind.APPLIED.value),
@@ -829,15 +903,19 @@ class Erp:
             "SELECT id FROM payment_hold WHERE invoice_id = ? AND decision = ? ORDER BY seq",
             (invoice_id, DecisionKind.APPLIED.value),
         ).fetchall()
+        # `AND currency = ?`: summing amounts across currencies produces a number that is not
+        # money in any of them. `stage_credit_memo` already refuses an invoice-linked credit in
+        # another currency, so this filter should never exclude a row -- it is here so that the
+        # total stays truthful even if some future path gets past that check.
         credits = self._conn.execute(
             "SELECT COALESCE(SUM(amount), 0) AS total FROM credit_memo"
-            " WHERE invoice_id = ? AND decision = ?",
-            (invoice_id, DecisionKind.APPLIED.value),
+            " WHERE invoice_id = ? AND decision = ? AND currency = ?",
+            (invoice_id, DecisionKind.APPLIED.value, currency),
         ).fetchone()
         return PaymentStatus(
             invoice_id=invoice_id,
             state=InvoiceState(_text(row, "state")),
-            currency=_text(row, "currency"),
+            currency=currency,
             total=_number(row, "total"),
             applied_posting=None if applied_posting is None else _text(applied_posting, "id"),
             applied_holds=tuple(_text(hold, "id") for hold in holds),
@@ -899,10 +977,8 @@ class Erp:
     def get_staged(self, principal: Principal, change_key: str) -> StagedChangeRow:
         """One staged change by its key, for `p2p review`. Visibility as in `list_staged`."""
         assert_can(principal, Action.READ_STAGED)
-        kind, row = self._resolve_change(change_key)
+        kind, row = self._resolve_change(principal, change_key)
         change = self._staged_row(kind, row)
-        if change.company_code != principal.company_code:
-            raise _not_visible()
         if principal.role is Role.APPROVER:
             if change.staged_by == principal.subject:
                 raise AccessDenied(
@@ -913,9 +989,29 @@ class Erp:
         return change
 
     def get_case(self, principal: Principal, case_id: str) -> DisputeCase:
-        row = self._one("SELECT * FROM dispute_case WHERE id = ?", case_id, "dispute case")
+        row = self._case_row(principal, case_id)
         assert_can(principal, Action.READ_CASE, _owner(row))
         return _case(row)
+
+    def _case_row(self, principal: Principal, case_id: str) -> sqlite3.Row:
+        """One case by id, scoped by company code **and**, for a disputes agent, by assignee.
+
+        The assignee predicate is in the query for the same reason the company one is: a refusal
+        that says "not assigned to you" for a case that exists, and "no case visible" for one that
+        does not, tells a disputes agent which of its colleagues' case ids are real. One message
+        for both. `assert_can` still judges the row afterwards and simply never fires here.
+        """
+        if principal.role is Role.DISPUTES:
+            return self._one(
+                "SELECT * FROM dispute_case WHERE id = ? AND company_code = ? AND assigned_to = ?",
+                (case_id, principal.company_code, principal.subject),
+                "dispute case",
+            )
+        return self._one(
+            "SELECT * FROM dispute_case WHERE id = ? AND company_code = ?",
+            (case_id, principal.company_code),
+            "dispute case",
+        )
 
     def list_cases(
         self, principal: Principal, *, limit: int | None = None, offset: int = 0
@@ -923,14 +1019,22 @@ class Erp:
         """Cases the principal may see: its own for `disputes`, all of them for an approver."""
         assert_can(principal, Action.READ_CASE)
         size, skip = _page(limit, offset)
-        rows = self._conn.execute(
-            "SELECT * FROM dispute_case WHERE company_code = ? ORDER BY id LIMIT ? OFFSET ?",
-            (principal.company_code, size, skip),
-        ).fetchall()
+        # The assignee predicate is in the SQL, not in a loop after it: filtering a page that was
+        # already cut by LIMIT means a disputes agent whose cases sort late gets an empty first
+        # page and concludes it has none.
+        if principal.role is Role.DISPUTES:
+            rows = self._conn.execute(
+                "SELECT * FROM dispute_case WHERE company_code = ? AND assigned_to = ?"
+                " ORDER BY id LIMIT ? OFFSET ?",
+                (principal.company_code, principal.subject, size, skip),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM dispute_case WHERE company_code = ? ORDER BY id LIMIT ? OFFSET ?",
+                (principal.company_code, size, skip),
+            ).fetchall()
         visible = []
         for row in rows:
-            if principal.role is Role.DISPUTES and _text(row, "assigned_to") != principal.subject:
-                continue
             assert_can(principal, Action.READ_CASE, _owner(row))
             visible.append(_case(row))
         return tuple(visible)
@@ -939,7 +1043,7 @@ class Erp:
         self, principal: Principal, case_id: str, *, limit: int | None = None
     ) -> tuple[CaseEvent, ...]:
         """The last `limit` events of a case, oldest first. Default 10, the spec's window (5.1)."""
-        case_row = self._one("SELECT * FROM dispute_case WHERE id = ?", case_id, "dispute case")
+        case_row = self._case_row(principal, case_id)
         assert_can(principal, Action.READ_CASE, _owner(case_row))
         size = DEFAULT_CASE_EVENTS if limit is None else min(max(limit, 1), MAX_PAGE)
         rows = self._conn.execute(
@@ -963,7 +1067,11 @@ class Erp:
 
         An approver sees every run in its company code, as it sees everything else there.
         """
-        row = self._one("SELECT * FROM batch_run WHERE id = ?", run_id, "batch run")
+        row = self._one(
+            "SELECT * FROM batch_run WHERE id = ? AND company_code = ?",
+            (run_id, principal.company_code),
+            "batch run",
+        )
         assert_can(principal, Action.READ_BATCH_RUN, _owner(row))
         if principal.role is Role.CLERK and _text(row, "started_by") != principal.subject:
             raise AccessDenied("no batch run visible to this principal")
@@ -999,8 +1107,6 @@ class Erp:
         the same call. 18.4 calls `advance_invoice` itself when the extraction succeeded and the
         invoice was still `received`.
         """
-        row = self._one("SELECT * FROM invoice WHERE id = ?", invoice_id, "invoice")
-        assert_can(principal, Action.RECORD_EXTRACTION, _owner(row))
         if attempts not in (1, 2):
             raise ValidationFailed("attempts must be 1 or 2: one attempt plus at most one repair")
         if repaired and attempts != 2:
@@ -1011,6 +1117,8 @@ class Erp:
         task = _clean_text(model_task, "model_task", cap=64)
         recorded_at = self._now()
         with self._write() as conn:
+            row = self._invoice_row(principal, invoice_id)
+            assert_can(principal, Action.RECORD_EXTRACTION, _owner(row))
             cursor = conn.execute(
                 "INSERT INTO extraction (company_code, invoice_id, attempts, repaired, confidence,"
                 " fields_json, model_task, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1049,15 +1157,25 @@ class Erp:
         the table's "any -> itself", which is a no-op. The other four are caused by staging a
         posting or by an approver's decision, and are made inside `stage_posting` and
         `apply_change`; asking for one here is refused with a reason that says which path makes it.
+
+        The read, the check and the UPDATE are all inside one `BEGIN IMMEDIATE`, and the UPDATE
+        names the state it expects. Outside it, two connections could both read `extracted` and the
+        second would write over whatever the first had done -- which is how an invoice gets
+        un-posted by a move the transition table never allowed.
         """
-        row = self._one("SELECT * FROM invoice WHERE id = ?", invoice_id, "invoice")
-        assert_can(principal, Action.ADVANCE_INVOICE, _owner(row))
-        current = InvoiceState(_text(row, "state"))
-        if current is to_state:
-            return self._invoice(principal, row)
-        self._check_caller_transition(current, to_state)
         with self._write() as conn:
-            conn.execute("UPDATE invoice SET state = ? WHERE id = ?", (to_state, invoice_id))
+            row = self._invoice_row(principal, invoice_id)
+            assert_can(principal, Action.ADVANCE_INVOICE, _owner(row))
+            current = InvoiceState(_text(row, "state"))
+            if current is not to_state:
+                self._check_caller_transition(current, to_state)
+                _one_row_changed(
+                    conn.execute(
+                        "UPDATE invoice SET state = ? WHERE id = ? AND state = ?",
+                        (to_state, invoice_id, current),
+                    ),
+                    "the invoice changed state while this transition was being made",
+                )
         return self.get_invoice(principal, invoice_id)
 
     @staticmethod
@@ -1084,29 +1202,39 @@ class Erp:
         "a posting staged": were they two calls, an invoice could sit in `staged` with nothing to
         approve, or a posting could wait against an invoice that still reads `matched`.
 
+        For the same reason the `matched` check is made **inside** the transaction and the UPDATE
+        carries `AND state = 'matched'`. Checked outside, two clerks could both read `matched` and
+        stage a posting each, and both would then apply cleanly, because applying a posting whose
+        invoice is already `posted` is the apply path's documented no-op. One invoice, two postings,
+        no error anywhere.
+
         Nothing is posted. An approver applies it later through `apply_change`, and the key this
         returns is the only handle on it once the output of this run is gone.
         """
-        row = self._one("SELECT * FROM invoice WHERE id = ?", invoice_id, "invoice")
-        assert_can(principal, Action.STAGE_POSTING, _owner(row))
-        current = InvoiceState(_text(row, "state"))
-        if current is not InvoiceState.MATCHED:
-            raise ValidationFailed(
-                f"a posting is staged against a matched invoice; this one is {current}"
-            )
         body = _dump_object(payload, "posting")
         staged_at = self._now()
         sql = _STAGED_SQL[ChangeKind.POSTING]
         with self._write() as conn:
+            row = self._invoice_row(principal, invoice_id)
+            assert_can(principal, Action.STAGE_POSTING, _owner(row))
+            current = InvoiceState(_text(row, "state"))
+            if current is not InvoiceState.MATCHED:
+                raise ValidationFailed(
+                    f"a posting is staged against a matched invoice; this one is {current}"
+                )
             key, seq = self._next_key(conn, ChangeKind.POSTING)
             conn.execute(
                 sql.insert,
                 (seq, key, principal.company_code, invoice_id, body, principal.subject, staged_at),
             )
-            conn.execute(
-                "UPDATE invoice SET state = ? WHERE id = ?", (InvoiceState.STAGED, invoice_id)
+            _one_row_changed(
+                conn.execute(
+                    "UPDATE invoice SET state = ? WHERE id = ? AND state = ?",
+                    (InvoiceState.STAGED, invoice_id, InvoiceState.MATCHED),
+                ),
+                "the invoice changed state while this posting was being staged",
             )
-        return self._staged_row(ChangeKind.POSTING, self._one(sql.by_key, key, "staged change"))
+        return self._staged_row(ChangeKind.POSTING, self._change_row(principal, key))
 
     def stage_credit_memo(
         self,
@@ -1122,19 +1250,27 @@ class Erp:
 
         A credit is a separate document against the supplier, which is why `credit_memo` has no
         state column and why applying one moves nothing.
+
+        A credit naming an invoice must be in that invoice's currency. Otherwise a 10,000 EUR credit
+        can be raised against a USD invoice and `get_payment_status` reports 10,000 against a USD
+        total -- a number that is money in neither currency, on a read tool app 19 consumes.
         """
-        supplier = self._one("SELECT * FROM supplier WHERE id = ?", supplier_id, "supplier")
-        assert_can(principal, Action.STAGE_CREDIT_MEMO, _owner(supplier))
         if amount <= 0:
             raise ValidationFailed("a credit memo's amount must be positive")
-        money = _clean_text(currency, "currency", cap=3).upper()
+        money = _currency(currency)
         why = _clean_text(reason, "reason", cap=500)
-        if invoice_id is not None:
-            invoice = self._one("SELECT * FROM invoice WHERE id = ?", invoice_id, "invoice")
-            assert_can(principal, Action.STAGE_CREDIT_MEMO, _owner(invoice))
         staged_at = self._now()
         sql = _STAGED_SQL[ChangeKind.CREDIT_MEMO]
         with self._write() as conn:
+            supplier = self._supplier_row(principal, supplier_id)
+            assert_can(principal, Action.STAGE_CREDIT_MEMO, _owner(supplier))
+            if invoice_id is not None:
+                invoice = self._invoice_row(principal, invoice_id)
+                assert_can(principal, Action.STAGE_CREDIT_MEMO, _owner(invoice))
+                if _text(invoice, "currency") != money:
+                    raise ValidationFailed(
+                        "a credit against an invoice must be in that invoice's currency"
+                    )
             key, seq = self._next_key(conn, ChangeKind.CREDIT_MEMO)
             conn.execute(
                 sql.insert,
@@ -1151,7 +1287,7 @@ class Erp:
                     staged_at,
                 ),
             )
-        return self._staged_row(ChangeKind.CREDIT_MEMO, self._one(sql.by_key, key, "staged change"))
+        return self._staged_row(ChangeKind.CREDIT_MEMO, self._change_row(principal, key))
 
     def stage_payment_hold(
         self,
@@ -1168,15 +1304,15 @@ class Erp:
         one against an invoice that is not yet posted is refused at stage time is 18.6's rule; what
         is guaranteed here is that applying it cannot move an invoice that is not `posted`.
         """
-        row = self._one("SELECT * FROM invoice WHERE id = ?", invoice_id, "invoice")
-        assert_can(principal, Action.STAGE_PAYMENT_HOLD, _owner(row))
         why = _clean_text(reason, "reason", cap=500)
-        if case_id is not None:
-            case_row = self._one("SELECT * FROM dispute_case WHERE id = ?", case_id, "dispute case")
-            assert_can(principal, Action.STAGE_PAYMENT_HOLD, _owner(case_row))
         staged_at = self._now()
         sql = _STAGED_SQL[ChangeKind.PAYMENT_HOLD]
         with self._write() as conn:
+            row = self._invoice_row(principal, invoice_id)
+            assert_can(principal, Action.STAGE_PAYMENT_HOLD, _owner(row))
+            if case_id is not None:
+                case_row = self._case_row(principal, case_id)
+                assert_can(principal, Action.STAGE_PAYMENT_HOLD, _owner(case_row))
             key, seq = self._next_key(conn, ChangeKind.PAYMENT_HOLD)
             conn.execute(
                 sql.insert,
@@ -1191,21 +1327,19 @@ class Erp:
                     staged_at,
                 ),
             )
-        return self._staged_row(
-            ChangeKind.PAYMENT_HOLD, self._one(sql.by_key, key, "staged change")
-        )
+        return self._staged_row(ChangeKind.PAYMENT_HOLD, self._change_row(principal, key))
 
     def open_case(
         self, principal: Principal, *, supplier_id: str, invoice_id: str | None = None
     ) -> DisputeCase:
         """Open a dispute case, assigned to the principal that opened it (slice 18.6)."""
-        supplier = self._one("SELECT * FROM supplier WHERE id = ?", supplier_id, "supplier")
-        assert_can(principal, Action.OPEN_CASE, _owner(supplier))
-        if invoice_id is not None:
-            invoice = self._one("SELECT * FROM invoice WHERE id = ?", invoice_id, "invoice")
-            assert_can(principal, Action.OPEN_CASE, _owner(invoice))
         opened_at = self._now()
         with self._write() as conn:
+            supplier = self._supplier_row(principal, supplier_id)
+            assert_can(principal, Action.OPEN_CASE, _owner(supplier))
+            if invoice_id is not None:
+                invoice = self._invoice_row(principal, invoice_id)
+                assert_can(principal, Action.OPEN_CASE, _owner(invoice))
             row = conn.execute("SELECT COUNT(*) AS n FROM dispute_case").fetchone()
             case_id = f"DC-{_number(row, 'n') + 1:04d}"
             conn.execute(
@@ -1235,13 +1369,10 @@ class Erp:
         """Move a case forward along the spec's chain. Never backwards; `resolved` is the end.
 
         Which step follows which is slice 18.6's state machine. This accessor only refuses to go
-        back, so that no slice can reopen a resolved case or un-escalate one.
+        back, so that no slice can reopen a resolved case or un-escalate one -- and, as with an
+        invoice, it reads and checks inside the transaction and names the state it expects, so two
+        concurrent steps cannot between them walk a case backwards.
         """
-        row = self._one("SELECT * FROM dispute_case WHERE id = ?", case_id, "dispute case")
-        assert_can(principal, Action.ADVANCE_CASE, _owner(row))
-        current = CaseState(_text(row, "state"))
-        if _CASE_ORDER.index(to_state) < _CASE_ORDER.index(current):
-            raise ValidationFailed(f"a case does not move back from {current} to {to_state}")
         if to_state is CaseState.ESCALATED and not escalated_reason:
             raise ValidationFailed("escalating a case needs the criterion it matched")
         why = (
@@ -1250,13 +1381,24 @@ class Erp:
             else _clean_text(escalated_reason, "escalated_reason", cap=500)
         )
         with self._write() as conn:
+            row = self._case_row(principal, case_id)
+            assert_can(principal, Action.ADVANCE_CASE, _owner(row))
+            current = CaseState(_text(row, "state"))
+            if _CASE_ORDER.index(to_state) < _CASE_ORDER.index(current):
+                raise ValidationFailed(f"a case does not move back from {current} to {to_state}")
             if why is None:
-                conn.execute("UPDATE dispute_case SET state = ? WHERE id = ?", (to_state, case_id))
-            else:
-                conn.execute(
-                    "UPDATE dispute_case SET state = ?, escalated_reason = ? WHERE id = ?",
-                    (to_state, why, case_id),
+                changed = conn.execute(
+                    "UPDATE dispute_case SET state = ? WHERE id = ? AND state = ?",
+                    (to_state, case_id, current),
                 )
+            else:
+                changed = conn.execute(
+                    "UPDATE dispute_case SET state = ?, escalated_reason = ?"
+                    " WHERE id = ? AND state = ?",
+                    (to_state, why, case_id, current),
+                )
+            if current is not to_state:
+                _one_row_changed(changed, "the case changed state while this step was being made")
         return self.get_case(principal, case_id)
 
     def set_case_summary(self, principal: Principal, case_id: str, summary: str) -> DisputeCase:
@@ -1266,10 +1408,10 @@ class Erp:
         replaced rather than appended: that is what makes it rolling. The events themselves stay
         append-only.
         """
-        row = self._one("SELECT * FROM dispute_case WHERE id = ?", case_id, "dispute case")
-        assert_can(principal, Action.ADVANCE_CASE, _owner(row))
         text = _clean_text(summary, "summary", cap=4000)
         with self._write() as conn:
+            row = self._case_row(principal, case_id)
+            assert_can(principal, Action.ADVANCE_CASE, _owner(row))
             conn.execute("UPDATE dispute_case SET summary = ? WHERE id = ?", (text, case_id))
         return self.get_case(principal, case_id)
 
@@ -1277,12 +1419,12 @@ class Erp:
         self, principal: Principal, case_id: str, *, kind: str, payload: Mapping[str, object]
     ) -> CaseEvent:
         """Append one event to a case's transcript. The table refuses updates and deletes."""
-        row = self._one("SELECT * FROM dispute_case WHERE id = ?", case_id, "dispute case")
-        assert_can(principal, Action.APPEND_CASE_EVENT, _owner(row))
         event_kind = _clean_text(kind, "kind", cap=64)
         body = _dump_object(payload, "case event")
         recorded_at = self._now()
         with self._write() as conn:
+            row = self._case_row(principal, case_id)
+            assert_can(principal, Action.APPEND_CASE_EVENT, _owner(row))
             seq_row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM case_event WHERE case_id = ?",
                 (case_id,),
@@ -1368,7 +1510,7 @@ class Erp:
         taking a different route -- which is why the UPDATE below deliberately carries no
         "WHERE decision IS NULL".
         """
-        kind, row = self._resolve_change(change_key)
+        kind, row = self._resolve_change(principal, change_key)
         assert_can(principal, Action.DECIDE_CHANGE, _owner(row))
         existing = self._staged_row(kind, row)
         if existing.decision is not None:
@@ -1392,7 +1534,7 @@ class Erp:
         except sqlite3.IntegrityError:
             # The apply-once trigger. Another decision landed between the read above and this
             # write; the database refused ours and rolled it back, so report what is recorded.
-            settled = self._staged_row(kind, self._one(sql.by_key, existing.change_key, "change"))
+            settled = self._staged_row(kind, self._change_row(principal, existing.change_key))
             if settled.decision is None:  # pragma: no cover - a constraint we do not know about
                 raise
             return ApplyOutcome(
@@ -1445,9 +1587,21 @@ class Erp:
                 f"this change would move its invoice {current} -> {target},"
                 " which is not a transition of this workflow"
             )
-        conn.execute("UPDATE invoice SET state = ? WHERE id = ?", (target, change.invoice_id))
+        _one_row_changed(
+            conn.execute(
+                "UPDATE invoice SET state = ? WHERE id = ? AND state = ?",
+                (target, change.invoice_id, current),
+            ),
+            "the invoice changed state while this decision was being applied",
+        )
 
     def _state_of(self, invoice_id: str | None) -> InvoiceState | None:
+        """The state of an invoice named by a change this principal has already been judged for.
+
+        Unscoped on purpose: the id comes from a staged-change row that `assert_can` has passed, and
+        a staged change cannot name an invoice outside its own company code -- the accessor that
+        records it reads the invoice through `_invoice_row`, which is scoped.
+        """
         if invoice_id is None:
             return None
         row = self._conn.execute("SELECT state FROM invoice WHERE id = ?", (invoice_id,)).fetchone()
@@ -1455,25 +1609,37 @@ class Erp:
 
     # -- internals ------------------------------------------------------------------------------
 
-    def _one(self, sql: str, key: str | int, what: str) -> sqlite3.Row:
-        row: sqlite3.Row | None = self._conn.execute(sql, (key,)).fetchone()
+    def _one(self, sql: str, params: tuple[object, ...], what: str) -> sqlite3.Row:
+        """Fetch one row or refuse. `sql` must carry the `company_code` predicate itself.
+
+        Every by-id lookup below is scoped by company code **in the query**, so a row that does not
+        exist and a row in another company code take the same path and get the same message. They
+        must: a different answer for each is an existence oracle for somebody else's records, and
+        the caller is not entitled to learn that the id is taken. `assert_can` still judges the row
+        afterwards, as the independent second check -- it simply never fires for these reads.
+        """
+        row: sqlite3.Row | None = self._conn.execute(sql, params).fetchone()
         if row is None:
-            # One message and one category whether the row is absent or in another company code: a
-            # different answer for each would tell a caller that somebody else's row exists. The
-            # spec's eval wants `permission` and no row data for a cross-company read, and this is
-            # what gives it that without leaking the easy case.
             raise AccessDenied(f"no {what} visible to this principal")
         return row
 
-    def _resolve_change(self, change_key: str) -> tuple[ChangeKind, sqlite3.Row]:
-        if not _KEY_PATTERN.match(change_key):
-            # Shape only -- no value echoed. A malformed key is the caller's own typo, and saying
-            # which prefixes exist is a schema fact, not somebody's data.
-            raise ValidationFailed(
-                "a change key is 'pst_', 'crd_' or 'hld_' followed by six digits"
-            )
-        kind = _KIND_BY_PREFIX[change_key[:4]]
-        return kind, self._one(_STAGED_SQL[kind].by_key, change_key, "staged change")
+    def _resolve_change(
+        self, principal: Principal, change_key: str
+    ) -> tuple[ChangeKind, sqlite3.Row]:
+        kind = _kind_of(change_key)
+        return kind, self._one(
+            _STAGED_SQL[kind].by_key,
+            (change_key, principal.company_code),
+            "staged change",
+        )
+
+    def _change_row(self, principal: Principal, change_key: str) -> sqlite3.Row:
+        kind = _kind_of(change_key)
+        return self._one(
+            _STAGED_SQL[kind].by_key,
+            (change_key, principal.company_code),
+            "staged change",
+        )
 
     def _next_key(self, conn: sqlite3.Connection, kind: ChangeKind) -> tuple[str, int]:
         row = conn.execute(_STAGED_SQL[kind].next_seq).fetchone()
@@ -1562,6 +1728,31 @@ def _case(row: sqlite3.Row) -> DisputeCase:
 
 def _not_visible() -> AccessDenied:
     return AccessDenied("no staged change visible to this principal")
+
+
+def _kind_of(change_key: str) -> ChangeKind:
+    """Which table a key names, from its prefix. Shape checked before any lookup happens.
+
+    A malformed key is the caller's own typo and so a `validation` failure; only a well-formed key
+    can reach a lookup and therefore produce a `permission` one. The message names the three valid
+    prefixes -- a schema fact -- and never echoes the key, which may have come from a model or from
+    another company's output.
+    """
+    if not _KEY_PATTERN.match(change_key):
+        raise ValidationFailed("a change key is 'pst_', 'crd_' or 'hld_' followed by six digits")
+    return _KIND_BY_PREFIX[change_key[:4]]
+
+
+def _one_row_changed(cursor: sqlite3.Cursor, complaint: str) -> None:
+    """Refuse unless an UPDATE changed exactly the one row it named.
+
+    Every state UPDATE in this module carries the state it expects as a predicate, so a row count of
+    zero means the row moved under it. Inside `BEGIN IMMEDIATE` that should be impossible, which is
+    the point: if it happens, the transaction is rolled back rather than reporting a change it did
+    not make. `transient`, because the caller losing a race may well win the next one.
+    """
+    if cursor.rowcount != 1:
+        raise TransientFailure(complaint)
 
 
 def _like_escape(value: str) -> str:

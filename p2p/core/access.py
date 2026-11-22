@@ -169,7 +169,8 @@ def assert_can(principal: Principal, action: Action, row: Row | None = None) -> 
     """Refuse with `AccessDenied` unless `principal` may do `action`, on `row` if one is given.
 
     `row` is omitted only where there is no row yet to judge -- opening a case, listing within the
-    principal's own company code. Every accessor that reads or changes an existing row passes it.
+    principal's own company code. Every accessor that reads or changes an existing row passes it,
+    and a row that is passed must carry `company_code`.
     """
     if action not in _ALLOWED[principal.role]:
         raise AccessDenied(f"a principal with role {principal.role} may not {action}")
@@ -177,8 +178,13 @@ def assert_can(principal: Principal, action: Action, row: Row | None = None) -> 
     if row is None:
         return
 
-    owner = row.get("company_code")
-    if owner is not None and owner != principal.company_code:
+    # Fails closed: a row handed to the check must carry the column the check judges it by. `is not
+    # None` would have skipped rule 2 silently for a row whose owner column was missing, and the
+    # day somebody passes a row from a table that has none -- or misspells the key -- the refusal
+    # that should have happened simply would not.
+    if "company_code" not in row:
+        raise AccessDenied(f"this row carries no company code; {action} refused")
+    if row["company_code"] != principal.company_code:
         # No value in the message, in either direction: that this row exists at all is already more
         # than the caller is entitled to know.
         raise AccessDenied(f"this row is not in the principal's company code; {action} refused")

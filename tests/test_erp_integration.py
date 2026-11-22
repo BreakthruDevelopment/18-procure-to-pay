@@ -84,6 +84,123 @@ def test_a_cross_company_read_returns_a_permission_failure_and_no_row_data(
         assert leak not in message, leak
 
 
+def test_a_row_in_another_company_is_indistinguishable_from_one_that_does_not_exist(
+    erp: Erp, clerk: Principal, approver: Principal, disputes: Principal
+) -> None:
+    """Not merely "no values in the message" -- the two messages must be the SAME message.
+
+    A different answer for each is an existence oracle: a caller that gets "not in your company
+    code" for `INV-2001` and "no invoice visible" for `INV-9999` has learned that the first id is
+    taken. Asserting only the category and the absence of values, as the test above does, passes
+    while that distinction is wide open, which is exactly how it survived the first round.
+    """
+    probes: tuple[tuple[object, str, str], ...] = (
+        (lambda key: erp.get_invoice(clerk, key), OTHER_INVOICE, "INV-9999"),
+        (lambda key: erp.get_supplier(clerk, key), "SUP-2001", "SUP-9999"),
+        (lambda key: erp.get_purchase_order(clerk, key), "PO-2001", "PO-9999"),
+        (lambda key: erp.get_payment_status(clerk, key), OTHER_INVOICE, "INV-9999"),
+        (lambda key: erp.get_case(disputes, key), "DC-0002", "DC-9999"),
+        (lambda key: erp.get_batch_run(clerk, key), "BR-000001", "BR-999999"),
+        (lambda key: erp.get_staged(approver, key), "pst_000001", "pst_999999"),
+    )
+    for call, elsewhere, absent in probes:
+        assert callable(call)
+        with pytest.raises(AccessDenied) as other_company:
+            call(elsewhere)
+        with pytest.raises(AccessDenied) as nonexistent:
+            call(absent)
+        assert str(other_company.value) == str(nonexistent.value), elsewhere
+        assert other_company.value.category == "permission"
+
+
+def test_a_disputes_agent_sees_its_own_case_even_on_a_short_page(erp: Erp) -> None:
+    """The assignee predicate is in the SQL, so pagination cannot hide a principal's own cases.
+
+    Filtering after `LIMIT` returned an empty first page for the agent who owns `DC-0002`, because
+    `DC-0001` -- somebody else's -- used up the page.
+    """
+    other_agent = Principal("disputes2@demo", Role.DISPUTES, "1000")
+    assert [case.id for case in erp.list_cases(other_agent, limit=1)] == [OTHER_AGENTS_CASE]
+    assert [case.id for case in erp.list_cases(other_agent)] == [OTHER_AGENTS_CASE]
+
+
+def test_a_credit_against_an_invoice_must_be_in_that_invoices_currency(
+    erp: Erp, clerk: Principal, disputes: Principal, approver: Principal
+) -> None:
+    """Otherwise `get_payment_status` reports a total that is money in neither currency."""
+    with pytest.raises(ValidationFailed, match="invoice's currency"):
+        erp.stage_credit_memo(
+            disputes,
+            supplier_id="SUP-1003",
+            invoice_id=DISPUTED_INVOICE,
+            amount=10_000,
+            currency="EUR",
+            reason="goodwill",
+        )
+    # The same amount in the invoice's own currency is fine, and lands on the payment status.
+    change = erp.stage_credit_memo(
+        disputes,
+        supplier_id="SUP-1003",
+        invoice_id=DISPUTED_INVOICE,
+        amount=10_000,
+        currency="USD",
+        reason="goodwill",
+    )
+    erp.apply_change(approver, change.change_key, Decision.applied())
+    status = erp.get_payment_status(clerk, DISPUTED_INVOICE)
+    assert (status.currency, status.applied_credit_total) == ("USD", 10_000)
+
+
+def test_a_credit_not_naming_an_invoice_may_be_in_any_currency(
+    erp: Erp, disputes: Principal
+) -> None:
+    change = erp.stage_credit_memo(
+        disputes, supplier_id="SUP-1003", amount=500, currency="eur", reason="rebate"
+    )
+    assert change.currency == "EUR"  # normalized, not merely trimmed
+
+
+def test_a_currency_must_be_a_three_letter_code(erp: Erp, disputes: Principal) -> None:
+    for bad in ("euro", "US", "U$D", "", "  "):
+        with pytest.raises(ValidationFailed, match="three-letter code"):
+            erp.stage_credit_memo(
+                disputes, supplier_id="SUP-1003", amount=100, currency=bad, reason="x"
+            )
+
+
+def test_an_invoice_can_be_found_by_its_number_in_any_state(
+    erp: Erp, clerk: Principal, other_clerk: Principal
+) -> None:
+    """What slice 18.4 has to resolve a document with: a draft carries a number, never an id."""
+    (found,) = erp.find_invoices_by_number(clerk, "1001-A")
+    assert found.id == BATCH_INVOICE
+    # Including `posted` and `held`, which `list_open_invoices` excludes by definition: re-ingesting
+    # an invoice a previous run advanced must report `already advanced`, not `failed`.
+    (disputed,) = erp.find_invoices_by_number(clerk, "1013-D")
+    assert (disputed.id, disputed.state) == (DISPUTED_INVOICE, InvoiceState.POSTED)
+    assert erp.find_invoices_by_number(clerk, "nothing-like-this") == ()
+    # Scoped by company code like every other read.
+    assert erp.find_invoices_by_number(other_clerk, "1001-A") == ()
+    assert [i.id for i in erp.find_invoices_by_number(other_clerk, "2001-A")] == [OTHER_INVOICE]
+    # And by supplier, which a draft also carries.
+    assert erp.find_invoices_by_number(clerk, "1001-A", supplier_id="SUP-1006") == ()
+
+
+def test_finding_by_number_returns_every_match_so_a_duplicate_is_visible(
+    erp: Erp, clerk: Principal, raw: sqlite3.Connection
+) -> None:
+    """A duplicate invoice number is one of 18.5's forcing rules, so it must not be hidden."""
+    raw.execute(
+        "INSERT INTO invoice (id, company_code, supplier_id, po_ref, number, date, currency,"
+        " total, state) VALUES ('INV-1099', '1000', 'SUP-1001', 'PO-1001', '1001-A', '2026-11-18',"
+        " 'USD', 125000, 'received')"
+    )
+    assert [i.id for i in erp.find_invoices_by_number(clerk, "1001-A")] == [
+        BATCH_INVOICE,
+        "INV-1099",
+    ]
+
+
 def test_payment_status_is_scoped_to_the_company_code(erp: Erp, clerk: Principal) -> None:
     assert erp.get_payment_status(clerk, DISPUTED_INVOICE).state is InvoiceState.POSTED
     with pytest.raises(AccessDenied):
@@ -171,7 +288,9 @@ def test_a_disputes_principal_reads_its_own_case_and_not_another_agents(
     erp: Erp, disputes: Principal
 ) -> None:
     assert erp.get_case(disputes, MY_CASE).assigned_to == "disputes@demo"
-    with pytest.raises(AccessDenied, match="assigned to it"):
+    # The refusal says only "not visible": naming the assignment rule here would confirm that
+    # another agent's case id is real. `list_cases` and the writes below carry the same message.
+    with pytest.raises(AccessDenied, match="no dispute case visible"):
         erp.get_case(disputes, OTHER_AGENTS_CASE)
     # Both cases are in this principal's company code, so the filter alone would not catch it.
     assert [case.id for case in erp.list_cases(disputes)] == [MY_CASE]
@@ -181,23 +300,27 @@ def test_a_disputes_principal_cannot_read_another_agents_transcript(
     erp: Erp, disputes: Principal
 ) -> None:
     assert len(erp.list_case_events(disputes, MY_CASE)) == 1
-    with pytest.raises(AccessDenied, match="assigned to it"):
+    with pytest.raises(AccessDenied, match="no dispute case visible"):
         erp.list_case_events(disputes, OTHER_AGENTS_CASE)
 
 
 def test_a_disputes_principal_cannot_write_to_another_agents_case(
     erp: Erp, disputes: Principal
 ) -> None:
-    with pytest.raises(AccessDenied, match="assigned to it"):
-        erp.append_case_event(disputes, OTHER_AGENTS_CASE, kind="note", payload={})
-    with pytest.raises(AccessDenied, match="assigned to it"):
-        erp.advance_case(disputes, OTHER_AGENTS_CASE, CaseState.RESOLVED)
-    with pytest.raises(AccessDenied, match="assigned to it"):
-        erp.set_case_summary(disputes, OTHER_AGENTS_CASE, "mine now")
-    with pytest.raises(AccessDenied, match="assigned to it"):
-        erp.stage_payment_hold(
+    for forbidden in (
+        lambda: erp.append_case_event(disputes, OTHER_AGENTS_CASE, kind="note", payload={}),
+        lambda: erp.advance_case(disputes, OTHER_AGENTS_CASE, CaseState.RESOLVED),
+        lambda: erp.set_case_summary(disputes, OTHER_AGENTS_CASE, "mine now"),
+        lambda: erp.stage_payment_hold(
             disputes, invoice_id=DISPUTED_INVOICE, reason="x", case_id=OTHER_AGENTS_CASE
-        )
+        ),
+    ):
+        with pytest.raises(AccessDenied, match="no dispute case visible"):
+            forbidden()
+    # Nothing was written to the case this principal does not own.
+    approver_view = Principal("approver@demo", Role.APPROVER, "1000")
+    assert erp.get_case(approver_view, OTHER_AGENTS_CASE).state is CaseState.INVESTIGATING
+    assert len(erp.list_case_events(approver_view, OTHER_AGENTS_CASE)) == 1
 
 
 # ---------------------------------------------------------------------------------------------

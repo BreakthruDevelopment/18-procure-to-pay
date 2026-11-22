@@ -52,6 +52,19 @@ later slice is most likely to break by accident:
   database. `p2p demo` and `scripts/smoke.sh` build their own file in a fresh `mkdtemp()` directory
   and **ignore the configured path**. Both files are force-included into the wheel at `p2p/_sql/`
   (see `pyproject.toml`), so a new SQL file needs an entry there and a `COPY` in the `Dockerfile`.
+- **A read, its `assert_can` and the UPDATE that depends on them live in ONE `BEGIN IMMEDIATE`.**
+  A state checked before the transaction is a state that can move before the write: that shipped
+  once here, and one invoice got two postings with no error anywhere. Every state UPDATE also names
+  the state it expects (`AND state = ?`) and checks the affected-row count.
+- **A refusal must not distinguish "not yours" from "does not exist".** Every by-id lookup carries
+  its `company_code` -- and, for a case read by a disputes agent, its `assigned_to` -- inside the
+  SQL, so both take the same path and get the same message. Two different messages are an existence
+  oracle for another company's ids.
+- **`find_invoices_by_number`** is how a document reaches its `invoice` row: an `InvoiceDraft`
+  carries a number, never an id, and `p2p ingest` refuses a document with no seeded row rather than
+  inserting one. It returns every state (including `posted` and `held`, so a re-ingest can report
+  `already advanced`) and every match (so a duplicate invoice number is visible to 18.5's forcing
+  rule).
 - **The invoice transition table is in `erp.py` and nowhere else.** `advance_invoice` takes the two
   moves a clerk's own work causes; `matched -> staged` happens inside `stage_posting`, and the three
   an approver causes inside `apply_change`. `held` is terminal: no slice may add a way out of it.

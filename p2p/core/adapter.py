@@ -28,6 +28,8 @@ and `apply`), and this spec adds no field to it.
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Protocol
@@ -35,6 +37,7 @@ from typing import Final, Protocol
 from agent_container.core.tool import (
     AnyTool,
     Effect,
+    ErrorCategory,
     StagedChange,
     Tool,
     ToolContext,
@@ -45,6 +48,18 @@ from pydantic import BaseModel
 from p2p.core.access import READ_ACTIONS, Action, Principal, assert_can
 from p2p.core.erp import Decision, Erp, StagedChangeRow
 from p2p.core.errors import InternalFailure, P2PError, ValidationFailed
+
+_log = logging.getLogger(__name__)
+
+
+def log_internal_failure(tool_name: str) -> None:
+    """Record that a tool failed for a reason this app did not name, with its traceback.
+
+    The caller gets a fixed message; whoever is operating the app gets the traceback. Only the tool
+    name is logged from the call -- never the arguments, which carry document text.
+    """
+    _log.exception("tool failed internally", extra={"tool": tool_name})
+
 
 #: A tool result's own size cap, matching the spec's 8,000 characters per tool result. Reads are
 #: already paged by `erp.py`; this is the backstop for a page that is small in rows and large in
@@ -197,6 +212,19 @@ class ErpTool[A: BaseModel](Tool[A]):
                 )
         except P2PError as failure:
             return as_error(failure)
+        except sqlite3.OperationalError:
+            # A locked or busy database: the one failure here that is worth trying again. Its own
+            # message is not returned -- a driver message is not written for a model to read, and
+            # SQLite's can quote the statement.
+            return ToolResult.error(
+                ErrorCategory.TRANSIENT, "the ERP was busy; this call can be tried again"
+            )
+        except Exception:
+            # App 17's contract is that a tool returns failures as results and does not raise, so an
+            # exception that is not one of ours still has to come back as one. `internal`, and a
+            # fixed message: the exception's own text is unreviewed and may carry a row's values.
+            log_internal_failure(self._operation.name)
+            return ToolResult.error(ErrorCategory.INTERNAL, "this tool failed; nothing was done")
         if outcome.staged is None:
             return ToolResult.ok(outcome.content)
         return ToolResult.ok(

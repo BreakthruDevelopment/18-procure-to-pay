@@ -7,6 +7,7 @@ mechanism they will be declared with, exercised through operations defined in th
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import Iterator, Mapping
 
 import pytest
@@ -336,3 +337,59 @@ def test_a_tool_is_bound_to_one_principal_for_its_whole_life(
     assert result.is_error is True
     assert result.error_category is ErrorCategory.PERMISSION
     del clerk
+
+
+# ---------------------------------------------------------------------------------------------
+# App 17's contract: a tool returns failures as results and does not raise -- including the
+# failures this app did not name
+# ---------------------------------------------------------------------------------------------
+
+
+def _explodes(erp: Erp, principal: Principal, args: InvoiceArgs) -> OperationOutcome:
+    del erp, principal, args
+    raise RuntimeError("a bug, carrying 1001-A and company 1000 in its message")
+
+
+def _locked(erp: Erp, principal: Principal, args: InvoiceArgs) -> OperationOutcome:
+    del erp, principal, args
+    raise sqlite3.OperationalError("database is locked")
+
+
+EXPLODES = ErpOperation(
+    name="explodes",
+    description="A read with a bug in it.",
+    effect=Effect.READ,
+    input_model=InvoiceArgs,
+    action=Action.READ_INVOICE,
+    run=_explodes,
+)
+LOCKED = ErpOperation(
+    name="locked",
+    description="A read that finds the database busy.",
+    effect=Effect.READ,
+    input_model=InvoiceArgs,
+    action=Action.READ_INVOICE,
+    run=_locked,
+)
+
+
+def test_an_unexpected_exception_becomes_an_internal_result_and_leaks_nothing(
+    erp: Erp, clerk: Principal, ctx: ToolContext
+) -> None:
+    """`TransientFailure` being defined and never raised was the tell that this path was missing."""
+    result = _call(EXPLODES.bind(erp, clerk), {"invoice_id": BATCH_INVOICE}, ctx)
+    assert result.is_error is True
+    assert result.error_category is ErrorCategory.INTERNAL
+    assert result.is_retryable is False
+    # The exception's own text is unreviewed: it may carry a row's values, so it is not returned.
+    for leak in ("1001-A", "1000", "a bug"):
+        assert leak not in result.content, leak
+
+
+def test_a_busy_database_becomes_a_retryable_transient_result(
+    erp: Erp, clerk: Principal, ctx: ToolContext
+) -> None:
+    result = _call(LOCKED.bind(erp, clerk), {"invoice_id": BATCH_INVOICE}, ctx)
+    assert result.error_category is ErrorCategory.TRANSIENT
+    assert result.is_retryable is True
+    assert "locked" not in result.content

@@ -581,6 +581,21 @@ _STAGED_SQL: Final[Mapping[ChangeKind, _StagedSql]] = {
 }
 
 
+def _hold_summary(invoice_id: str, case_id: str | None) -> str:
+    """What a person reads before approving a payment hold. It names the case when there is one.
+
+    `AGENTS.md`'s rule, from the credit above: a staged change's summary names every row the change
+    touches. It matters more for a hold than it looks -- staging one against a case is now refused
+    unless the case is about that invoice's supplier, so the case *is* the relationship an approver
+    is being asked to trust, and a summary that omits it made a case-linked hold and a standalone
+    one read identically. (A posting needs no such line: `post invoice INV-1001` names everything it
+    touches, and its payload travels on the `StagedChangeRow` for `p2p review` to render.)
+    """
+    if case_id is None:
+        return f"hold payment on invoice {invoice_id}"
+    return f"hold payment on invoice {invoice_id} under dispute case {case_id}"
+
+
 def _credit_summary(amount: int, currency: str, supplier_id: str, invoice_id: str | None) -> str:
     """What a person reads before approving a credit. It names the invoice when there is one.
 
@@ -654,7 +669,7 @@ class Erp:
         return erp
 
     def _applied_version(self) -> int:
-        row = self._conn.execute("PRAGMA user_version").fetchone()
+        row = self._row("PRAGMA user_version")
         return _number(row, "user_version") if row is not None else 0
 
     def _initialize(self) -> None:
@@ -683,7 +698,7 @@ class Erp:
         )
         try:
             self._conn.executescript(script)
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as failure:
             # Two callers can both read `user_version == 0` above -- the read takes no write lock,
             # and there is no database yet to take one on. They then both run this script, and the
             # loser is told `table supplier already exists`. It has nothing to roll back: the
@@ -691,8 +706,12 @@ class Erp:
             # opened. The honest answer for the loser is that the database is now built, which is
             # what it wanted; anything else is a raw driver exception out of the one code path that
             # creates the file, in a module no later slice may edit.
-            if self._conn.in_transaction:
-                self._conn.execute("ROLLBACK")
+            self._rollback()
+            # A lock, rather than "the tables are already there", is the transient case and must not
+            # be read as either success or corruption: the database may well be mid-build.
+            mapped = _busy_or(failure)
+            if isinstance(mapped, TransientFailure):
+                raise mapped from failure
             if self._applied_version() == SCHEMA_VERSION:
                 return
             raise
@@ -733,14 +752,19 @@ class Erp:
         """
         try:
             self._conn.execute("BEGIN IMMEDIATE")
-        except sqlite3.OperationalError as busy:
-            raise _busy_or(busy) from busy
+        except sqlite3.OperationalError as failure:
+            raise _busy_or(failure) from failure
         try:
             yield self._conn
             self._conn.execute("COMMIT")
-        except sqlite3.OperationalError as busy:
+        except sqlite3.OperationalError as failure:
             self._rollback()
-            raise _busy_or(busy) from busy
+            mapped = _busy_or(failure)
+            if isinstance(mapped, TransientFailure):
+                raise mapped from failure
+            # Not a lock -- a mistake in a statement. Re-raised as it is, so the traceback points
+            # at the statement rather than at this handler, and the adapter calls it `internal`.
+            raise
         except BaseException:
             self._rollback()
             raise
@@ -765,11 +789,11 @@ class Erp:
         assert_can(principal, Action.READ_SUPPLIER)
         needle = _clean_text(name, "name", cap=200)
         size, skip = _page(limit, offset)
-        rows = self._conn.execute(
+        rows = self._rows(
             "SELECT * FROM supplier WHERE company_code = ? AND name LIKE ? ESCAPE '\\'"
             " ORDER BY name LIMIT ? OFFSET ?",
             (principal.company_code, f"%{_like_escape(needle)}%", size, skip),
-        ).fetchall()
+        )
         return tuple(self._supplier(principal, row) for row in rows)
 
     def get_supplier(self, principal: Principal, supplier_id: str) -> Supplier:
@@ -826,15 +850,15 @@ class Erp:
         """The receipts recorded against a purchase order, or against one of its lines."""
         assert_can(principal, Action.READ_GOODS_RECEIPT)
         if line_no is None:
-            rows = self._conn.execute(
+            rows = self._rows(
                 "SELECT * FROM goods_receipt WHERE company_code = ? AND po_id = ? ORDER BY line_no",
                 (principal.company_code, po_id),
-            ).fetchall()
+            )
         else:
-            rows = self._conn.execute(
+            rows = self._rows(
                 "SELECT * FROM goods_receipt WHERE company_code = ? AND po_id = ? AND line_no = ?",
                 (principal.company_code, po_id, line_no),
-            ).fetchall()
+            )
         receipts = []
         for row in rows:
             assert_can(principal, Action.READ_GOODS_RECEIPT, _owner(row))
@@ -889,16 +913,16 @@ class Erp:
         wanted = _clean_text(number, "number", cap=100)
         size, _ = _page(limit, 0)
         if supplier_id is None:
-            rows = self._conn.execute(
+            rows = self._rows(
                 "SELECT * FROM invoice WHERE company_code = ? AND number = ? ORDER BY id LIMIT ?",
                 (principal.company_code, wanted, size),
-            ).fetchall()
+            )
         else:
-            rows = self._conn.execute(
+            rows = self._rows(
                 "SELECT * FROM invoice WHERE company_code = ? AND number = ? AND supplier_id = ?"
                 " ORDER BY id LIMIT ?",
                 (principal.company_code, wanted, supplier_id, size),
-            ).fetchall()
+            )
         return tuple(self._invoice(principal, row) for row in rows)
 
     def list_open_invoices(
@@ -907,11 +931,11 @@ class Erp:
         """Invoices in the principal's company code that are not yet posted or held."""
         assert_can(principal, Action.READ_OPEN_INVOICES)
         size, skip = _page(limit, offset)
-        rows = self._conn.execute(
+        rows = self._rows(
             "SELECT * FROM invoice WHERE company_code = ? AND state NOT IN ('posted', 'held')"
             " ORDER BY id LIMIT ? OFFSET ?",
             (principal.company_code, size, skip),
-        ).fetchall()
+        )
         return tuple(
             self._invoice(principal, row, action=Action.READ_OPEN_INVOICES) for row in rows
         )
@@ -921,9 +945,9 @@ class Erp:
     ) -> Invoice:
         assert_can(principal, action, _owner(row))
         invoice_id = _text(row, "id")
-        lines = self._conn.execute(
+        lines = self._rows(
             "SELECT * FROM invoice_line WHERE invoice_id = ? ORDER BY line_no", (invoice_id,)
-        ).fetchall()
+        )
         return Invoice(
             id=invoice_id,
             company_code=_text(row, "company_code"),
@@ -955,23 +979,23 @@ class Erp:
         row = self._invoice_row(principal, invoice_id)
         assert_can(principal, Action.READ_PAYMENT_STATUS, _owner(row))
         currency = _text(row, "currency")
-        applied_posting = self._conn.execute(
+        applied_posting = self._row(
             "SELECT id FROM posting WHERE invoice_id = ? AND decision = ? ORDER BY seq LIMIT 1",
             (invoice_id, DecisionKind.APPLIED.value),
-        ).fetchone()
-        holds = self._conn.execute(
+        )
+        holds = self._rows(
             "SELECT id FROM payment_hold WHERE invoice_id = ? AND decision = ? ORDER BY seq",
             (invoice_id, DecisionKind.APPLIED.value),
-        ).fetchall()
+        )
         # `AND currency = ?`: summing amounts across currencies produces a number that is not
         # money in any of them. `stage_credit_memo` already refuses an invoice-linked credit in
         # another currency, so this filter should never exclude a row -- it is here so that the
         # total stays truthful even if some future path gets past that check.
-        credits = self._conn.execute(
+        credits = self._row(
             "SELECT COALESCE(SUM(amount), 0) AS total FROM credit_memo"
             " WHERE invoice_id = ? AND decision = ? AND currency = ?",
             (invoice_id, DecisionKind.APPLIED.value, currency),
-        ).fetchone()
+        )
         return PaymentStatus(
             invoice_id=invoice_id,
             state=InvoiceState(_text(row, "state")),
@@ -985,10 +1009,10 @@ class Erp:
     def list_extractions(self, principal: Principal, invoice_id: str) -> tuple[Extraction, ...]:
         """The append-only extraction trail for one invoice (statement 4.4)."""
         assert_can(principal, Action.READ_EXTRACTION)
-        rows = self._conn.execute(
+        rows = self._rows(
             "SELECT * FROM extraction WHERE company_code = ? AND invoice_id = ? ORDER BY id",
             (principal.company_code, invoice_id),
-        ).fetchall()
+        )
         trail = []
         for row in rows:
             assert_can(principal, Action.READ_EXTRACTION, _owner(row))
@@ -1024,7 +1048,7 @@ class Erp:
         assert_can(principal, Action.READ_STAGED)
         found: list[StagedChangeRow] = []
         for kind, sql in _STAGED_SQL.items():
-            for row in self._conn.execute(sql.undecided, (principal.company_code,)).fetchall():
+            for row in self._rows(sql.undecided, (principal.company_code,)):
                 staged_by = _text(row, "staged_by")
                 mine = staged_by == principal.subject
                 if principal.role is Role.APPROVER and mine:
@@ -1035,7 +1059,12 @@ class Erp:
         return tuple(sorted(found, key=lambda change: (change.staged_at, change.change_key)))
 
     def get_staged(self, principal: Principal, change_key: str) -> StagedChangeRow:
-        """One staged change by its key, for `p2p review`. Visibility as in `list_staged`."""
+        """One change by its key, for `p2p review`. Same visibility rule as `list_staged`.
+
+        Unlike `list_staged` it also returns a change that has already been decided, because
+        `p2p review` and `p2p approve` both have to be able to say what happened to one -- the
+        apply path's no-op reports a decision, and a person reading it needs to see whose.
+        """
         assert_can(principal, Action.READ_STAGED)
         kind, row = self._resolve_change(principal, change_key)
         change = self._staged_row(kind, row)
@@ -1083,16 +1112,16 @@ class Erp:
         # already cut by LIMIT means a disputes agent whose cases sort late gets an empty first
         # page and concludes it has none.
         if principal.role is Role.DISPUTES:
-            rows = self._conn.execute(
+            rows = self._rows(
                 "SELECT * FROM dispute_case WHERE company_code = ? AND assigned_to = ?"
                 " ORDER BY id LIMIT ? OFFSET ?",
                 (principal.company_code, principal.subject, size, skip),
-            ).fetchall()
+            )
         else:
-            rows = self._conn.execute(
+            rows = self._rows(
                 "SELECT * FROM dispute_case WHERE company_code = ? ORDER BY id LIMIT ? OFFSET ?",
                 (principal.company_code, size, skip),
-            ).fetchall()
+            )
         visible = []
         for row in rows:
             assert_can(principal, Action.READ_CASE, _owner(row))
@@ -1106,10 +1135,10 @@ class Erp:
         case_row = self._case_row(principal, case_id)
         assert_can(principal, Action.READ_CASE, _owner(case_row))
         size = DEFAULT_CASE_EVENTS if limit is None else min(max(limit, 1), MAX_PAGE)
-        rows = self._conn.execute(
+        rows = self._rows(
             "SELECT * FROM case_event WHERE case_id = ? ORDER BY seq DESC LIMIT ?",
             (case_id, size),
-        ).fetchall()
+        )
         return tuple(
             CaseEvent(
                 case_id=_text(row, "case_id"),
@@ -1689,10 +1718,30 @@ class Erp:
         """
         if invoice_id is None:
             return None
-        row = self._conn.execute("SELECT state FROM invoice WHERE id = ?", (invoice_id,)).fetchone()
+        row = self._row("SELECT state FROM invoice WHERE id = ?", (invoice_id,))
         return None if row is None else InvoiceState(_text(row, "state"))
 
     # -- internals ------------------------------------------------------------------------------
+
+    def _rows(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
+        """Every read in this module goes through here, for the same reason writes go through
+        `_write`: contention is translated into this app's own error at the **ERP** boundary, not
+        at the write boundary.
+
+        A read can be blocked too -- another connection holding an exclusive lock -- and a blocked
+        read is `transient` and retryable. Left to escape, it reached the gateway's six read tools
+        as an unclassified driver error and was reported `internal`, not retryable: a dead end, on
+        the frozen contract app 19 consumes, where telling a retry from a dead end is the whole of
+        exam statement 2.2.
+        """
+        try:
+            return self._conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as failure:
+            raise _busy_or(failure) from failure
+
+    def _row(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Row | None:
+        rows = self._rows(sql, params)
+        return rows[0] if rows else None
 
     def _one(self, sql: str, params: tuple[object, ...], what: str) -> sqlite3.Row:
         """Fetch one row or refuse. `sql` must carry the `company_code` predicate itself.
@@ -1703,7 +1752,7 @@ class Erp:
         the caller is not entitled to learn that the id is taken. `assert_can` still judges the row
         afterwards, as the independent second check -- it simply never fires for these reads.
         """
-        row: sqlite3.Row | None = self._conn.execute(sql, params).fetchone()
+        row = self._row(sql, params)
         if row is None:
             raise AccessDenied(f"no {what} visible to this principal")
         return row
@@ -1783,7 +1832,7 @@ class Erp:
             company_code=company_code,
             staged_by=staged_by,
             staged_at=staged_at,
-            summary=f"hold payment on invoice {held_invoice}",
+            summary=_hold_summary(held_invoice, _opt_text(row, "case_id")),
             decided_by=decided_by,
             decision=decision,
             applied_at=applied_at,
@@ -1834,7 +1883,7 @@ def _busy_or(failure: sqlite3.OperationalError) -> BaseException:
     """
     name = failure.sqlite_errorname
     if name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
-        return TransientFailure("the ERP was busy; this write can be tried again")
+        return TransientFailure("the ERP was busy; this can be tried again")
     return failure
 
 

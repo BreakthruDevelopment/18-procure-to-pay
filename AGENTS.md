@@ -80,6 +80,13 @@ later slice is most likely to break by accident:
 - **A staged write returns both** app 17's `StagedChange` and the row's `change_key`. Carry the key
   across every boundary -- MCP result, command output, batch summary: it is the only handle an
   approver has on the change.
+- **A contended database is `TransientFailure`, raised in `erp.py`, for reads as much as writes.**
+  Reads go through `_rows`/`_row` and writes through `_write`, and both translate a lock there --
+  not in a caller and not in the adapter. A read tool that reported a lock as `internal` would tell
+  app 19 a retryable failure was a dead end, which is the whole of exam statement 2.2. A
+  `sqlite3.OperationalError` that is *not* a lock ("no such column") is a bug and passes through
+  unclassified, so it is never reported as worth retrying; they are told apart by
+  `sqlite_errorname`, never by reading the message.
 - **Failures are the classes in `p2p/core/errors.py`**, each carrying its app-17 `error_category`
   and `is_retryable`. Pick the class; never pick a category at the call site. Build messages from
   fixed strings and schema-derived names only -- an id, a company code or a document's text in a

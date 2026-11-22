@@ -191,6 +191,27 @@ def test_a_staged_credits_summary_names_the_invoice_when_it_has_one(
     assert shown[against_invoice.change_key] == against_invoice.summary
 
 
+def test_a_staged_holds_summary_names_the_case_when_it_has_one(
+    erp: Erp, disputes: Principal, approver: Principal
+) -> None:
+    """Staging a hold under a case is refused unless the case is about that invoice's supplier, so
+    the case is the relationship an approver is asked to trust -- and without it in the summary a
+    case-linked hold and a standalone one on the same invoice read identically."""
+    under_case = erp.stage_payment_hold(
+        disputes, invoice_id=DISPUTED_INVOICE, reason="disputed", case_id=MY_CASE
+    )
+    standalone = erp.stage_payment_hold(
+        disputes, invoice_id=DISPUTED_INVOICE, reason="awaiting paperwork"
+    )
+    assert under_case.summary == (
+        f"hold payment on invoice {DISPUTED_INVOICE} under dispute case {MY_CASE}"
+    )
+    assert standalone.summary == f"hold payment on invoice {DISPUTED_INVOICE}"
+    assert under_case.summary != standalone.summary
+    shown = {change.change_key: change.summary for change in erp.list_staged(approver)}
+    assert shown[under_case.change_key] == under_case.summary
+
+
 def test_re_escalating_a_case_does_not_overwrite_the_criterion_already_recorded(
     erp: Erp, disputes: Principal
 ) -> None:

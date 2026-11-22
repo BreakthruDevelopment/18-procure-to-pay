@@ -10,6 +10,7 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import Iterator, Mapping
+from pathlib import Path
 
 import pytest
 from agent_container.core.gate import PermissionGate, Policy
@@ -417,3 +418,27 @@ def test_the_internal_log_line_carries_no_unreviewed_text(
     assert str(fields["where"]).startswith("test_adapter.py:")
     for leak in ("1001-A", "company 1000", "a bug"):
         assert leak not in caplog.text, leak
+
+
+def test_a_locked_read_reaches_a_tool_as_transient_and_retryable(
+    db_path: Path, ctx: ToolContext
+) -> None:
+    """The gateway's reads as app 19 would see them when the database is contended.
+
+    `is_retryable` on a read tool is the whole of exam statement 2.2, and this is the assertion that
+    pins it end to end: `erp.py` classifies the lock, the adapter passes the classification through.
+    """
+    with Erp.open(db_path, busy_timeout_ms=50) as blocked:
+        holder = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            holder.execute("BEGIN EXCLUSIVE")
+            result = _call(
+                GET_INVOICE.bind(blocked, Principal("clerk@demo", Role.CLERK, "1000")),
+                {"invoice_id": BATCH_INVOICE},
+                ctx,
+            )
+        finally:
+            holder.close()
+    assert result.is_error is True
+    assert result.error_category is ErrorCategory.TRANSIENT
+    assert result.is_retryable is True

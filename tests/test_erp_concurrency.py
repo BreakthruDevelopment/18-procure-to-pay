@@ -267,6 +267,48 @@ def test_a_locked_database_is_reported_as_transient_not_as_a_driver_error(
         holder.close()
 
 
+def test_a_locked_read_is_transient_too_not_a_dead_end(db_path: Path) -> None:
+    """A blocked READ is retryable, and it reaches the gateway's six read tools.
+
+    This was the unfinished half of the contention fix: the mapping was wired into `_write`, and no
+    read goes through `_write`, so a busy read escaped as a driver error and the adapter reported it
+    `internal` -- a dead end, on the frozen contract app 19 consumes, where `is_retryable` is the
+    whole of exam statement 2.2.
+    """
+    # The connection is opened BEFORE the lock is taken: an exclusive lock blocks even the
+    # `PRAGMA user_version` read that `Erp.open` makes, which the next test is about.
+    with Erp.open(db_path, busy_timeout_ms=50) as blocked:
+        holder = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            holder.execute("BEGIN EXCLUSIVE")
+            for read in (
+                lambda: blocked.get_invoice(_clerk(), BATCH_INVOICE),
+                lambda: blocked.list_open_invoices(_clerk()),
+                lambda: blocked.get_payment_status(_clerk(), BATCH_INVOICE),
+                lambda: blocked.find_supplier(_clerk(), "Rhine"),
+                lambda: blocked.list_staged(_approver()),
+            ):
+                with pytest.raises(TransientFailure, match="busy") as refused:
+                    read()
+                assert refused.value.category == "transient"
+                assert refused.value.is_retryable is True
+        finally:
+            holder.close()
+
+
+def test_opening_a_locked_database_for_the_first_time_is_transient(tmp_path: Path) -> None:
+    """Mid-build is neither "already built" nor corrupt: the caller may simply try again."""
+    target = tmp_path / "contended.sqlite3"
+    holder = sqlite3.connect(target, isolation_level=None)
+    try:
+        holder.execute("CREATE TABLE placeholder (x INTEGER)")
+        holder.execute("BEGIN EXCLUSIVE")
+        with pytest.raises(TransientFailure, match="busy"):
+            Erp.open(target, busy_timeout_ms=50)
+    finally:
+        holder.close()
+
+
 def test_a_bug_in_a_statement_is_not_reported_as_worth_retrying(erp: Erp) -> None:
     """`sqlite3.OperationalError` also means "no such column", which is not transient."""
     with pytest.raises(sqlite3.OperationalError, match="no such column"), erp._write() as conn:

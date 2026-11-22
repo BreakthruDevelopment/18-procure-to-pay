@@ -506,6 +506,40 @@ def test_an_approver_does_not_review_a_change_it_staged(erp: Erp, disputes: Prin
         del same_subject_change
 
 
+def test_a_clerk_or_disputes_agent_cannot_read_a_colleagues_change_by_its_key(
+    erp: Erp, clerk: Principal, disputes: Principal
+) -> None:
+    """`get_staged`'s rule for a non-approver, which `list_staged`'s three tests do not cover.
+
+    `get_staged` does not pass the row to `assert_can` -- there is no second check behind this
+    branch, unlike the deliberate belt-and-braces calls elsewhere -- so this *is* the enforcement.
+    Without it, a second clerk reads another clerk's posting payload and a second disputes agent a
+    colleague's credit-memo reason, both inside one company code, while `list_staged` goes on hiding
+    them and nothing looks wrong. The spec gives this slice one integration test per access rule per
+    table, and the disputes half of this one is the spec's rule, not this file's invention.
+    """
+    _match(erp, clerk, BATCH_INVOICE)
+    posting = erp.stage_posting(clerk, BATCH_INVOICE, {"account": "40100-private"})
+    credit = erp.stage_credit_memo(
+        disputes, supplier_id="SUP-1003", amount=1000, currency="USD", reason="a private note"
+    )
+
+    another_clerk = Principal("clerk2@demo", Role.CLERK, "1000")
+    with pytest.raises(AccessDenied, match="no staged change visible"):
+        erp.get_staged(another_clerk, posting.change_key)
+    another_agent = Principal("disputes2@demo", Role.DISPUTES, "1000")
+    with pytest.raises(AccessDenied, match="no staged change visible"):
+        erp.get_staged(another_agent, credit.change_key)
+
+    # Nor across the two roles, and each principal still reaches its own.
+    with pytest.raises(AccessDenied, match="no staged change visible"):
+        erp.get_staged(disputes, posting.change_key)
+    with pytest.raises(AccessDenied, match="no staged change visible"):
+        erp.get_staged(clerk, credit.change_key)
+    assert erp.get_staged(clerk, posting.change_key).payload == {"account": "40100-private"}
+    assert erp.get_staged(disputes, credit.change_key).reason == "a private note"
+
+
 # ---------------------------------------------------------------------------------------------
 # `list_staged`: the visibility rule, which is this slice's and not the command's
 # ---------------------------------------------------------------------------------------------

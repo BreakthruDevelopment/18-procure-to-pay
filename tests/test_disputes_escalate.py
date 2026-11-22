@@ -15,11 +15,8 @@ from p2p.disputes.escalate import (
     HOLD_NOT_POSTED,
     CreditAmountInterceptor,
     EscalationSink,
-    FlaggedSupplierInterceptor,
     HoldPostedGuard,
-    LoopInterceptor,
     NoPoInterceptor,
-    VarianceInterceptor,
     criteria_in_order,
     escalation_chain,
     first_match,
@@ -167,15 +164,26 @@ async def _ok() -> ToolResult:
     return ToolResult.ok("should not run")
 
 
+def test_the_sink_keeps_the_first_criterion_and_refuses_a_later_one() -> None:
+    """`check()` is a pure predicate that never writes the sink, so a test that called it and
+    then recorded by hand passed with `EscalationSink.record`'s guard deleted."""
+    sink = EscalationSink()
+    sink.record(Criterion.FLAGGED_SUPPLIER)
+    sink.record(Criterion.NO_PO)
+    sink.record(Criterion.LOOPED)
+    assert sink.criterion is Criterion.FLAGGED_SUPPLIER
+
+
 def test_later_criteria_do_not_overwrite_the_first_match(erp: Erp, disputes: Principal) -> None:
     case = erp.open_case(disputes, supplier_id="SUP-1006", invoice_id="INV-1011")
     facts = load_facts(erp, disputes, case.id).with_amount(400_000)
-    # No PO and a large credit: no PO is first in the written order.
+    # Several criteria hold at once; no PO is first in the written order.
+    assert NoPoInterceptor(facts, EscalationSink()).check(facts) is True
+    assert CreditAmountInterceptor(facts, EscalationSink()).check(facts) is True
     assert first_match(facts) is Criterion.NO_PO
+    # Through the real chain, not by recording into the sink by hand.
     sink = EscalationSink()
-    NoPoInterceptor(facts, sink).check(facts)
-    sink.record(Criterion.NO_PO)
-    FlaggedSupplierInterceptor(facts, sink).check(facts)
-    LoopInterceptor(facts, sink).check(facts)
-    VarianceInterceptor(facts, sink).check(facts)
+    chain = escalation_chain(facts, erp, disputes, sink)
+    result = asyncio.run(chain.run("get_invoice", _CreditArgs(amount=400_000), _CTX, lambda: _ok()))
+    assert result.is_error is False
     assert sink.criterion is Criterion.NO_PO

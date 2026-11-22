@@ -7,6 +7,7 @@ five written criteria. A free-text reply is a failed attempt: it is not parsed.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -30,6 +31,7 @@ from p2p.disputes.context import (
     CaseFacts,
     fence_transcript,
     load_facts,
+    read_result_payload,
     render_transcript,
     roll_summary,
 )
@@ -125,21 +127,47 @@ async def take_step(
     sink = EscalationSink()
     gateway: GatewayResult | None = None
     if ACTION_TOOLS[step.next_action] is not None:
-        chain = escalation_chain(facts.with_amount(step.amount), erp, principal, sink)
+        # `amount` is a fact about a credit the model is PROPOSING, so it reaches the criteria
+        # only on that action. Passing it on a read let model-controlled input decide a recorded
+        # escalation: a `read_invoice` step carrying `amount: 400000` escalated with "the credit
+        # exceeds 2,500", wrote that false reason to `dispute_case.escalated_reason`, and
+        # suppressed the clarifying question the spec requires when no criterion matches. The
+        # narrowing below (`first_match`) never applied, because the sink is consulted first and
+        # wins. The credit path is unaffected: `CreditAmountInterceptor.before` reads the real
+        # tool arguments, not these facts.
+        proposed = step.amount if step.next_action is NextAction.PROPOSE_CREDIT else None
+        chain = escalation_chain(facts.with_amount(proposed), erp, principal, sink)
         gateway = await _invoke(erp, principal, facts, step, chain)
 
     refused: str | None = None
     change_key: str | None = None
     change_description: str | None = None
+    read_result: dict[str, JsonValue] | None = None
     new_facts = False
     if gateway is not None and gateway.is_error:
         message = gateway.body.get("message")
         refused = message if isinstance(message, str) else "this tool failed; nothing was done"
     elif gateway is not None:
-        new_facts = True
         if gateway.staged is not None:
             change_key = gateway.staged.change_key
             change_description = gateway.staged.description
+            new_facts = True
+            # Recorded here, not with the rest of the step's events: the row is already
+            # committed, and anything between this point and `_record` can raise
+            # `TransientFailure` (`load_facts` and `advance_case` are both database calls).
+            # That left a staged credit with its key printed nowhere, so a retry staged a
+            # second one. The key now reaches the case transcript as soon as it exists.
+            erp.append_case_event(
+                principal, case_id, kind="staged", payload={"change_key": change_key}
+            )
+        else:
+            # A read's result is recorded on the case, bounded, so the next step's model is
+            # actually told what was read. It was discarded before, which also made the written
+            # loop criterion unreachable: a step that read the same invoice six times running
+            # counted as new facts every time, so "looped twice without new facts" never fired.
+            tool_name = ACTION_TOOLS[step.next_action]
+            read_result = read_result_payload(tool_name or "", gateway.body)
+            new_facts = (read_result["tool"], read_result["result"]) not in _reads_so_far(facts)
 
     updated = load_facts(erp, principal, case_id)
     amount = (
@@ -173,8 +201,8 @@ async def take_step(
         new_facts=new_facts,
         question=question,
         criterion=why,
-        change_key=change_key,
         refused=refused,
+        read_result=read_result,
         previous_summary=case.summary,
     )
     case = erp.get_case(principal, case_id)
@@ -189,6 +217,15 @@ async def take_step(
         refused=refused,
         new_facts=new_facts,
     )
+
+
+def _reads_so_far(facts: CaseFacts) -> set[tuple[object, object]]:
+    """Every read result already on the case, so a repeat of one is not new facts."""
+    return {
+        (event.payload.get("tool"), event.payload.get("result"))
+        for event in facts.history
+        if event.kind == "read"
+    }
 
 
 def _resolve_action(
@@ -320,14 +357,14 @@ def _record(
     new_facts: bool,
     question: str | None,
     criterion: str | None,
-    change_key: str | None,
     refused: str | None,
+    read_result: Mapping[str, JsonValue] | None,
     previous_summary: str | None,
 ) -> None:
+    if read_result is not None:
+        erp.append_case_event(principal, case_id, kind="read", payload=read_result)
     if question is not None:
         erp.append_case_event(principal, case_id, kind="question", payload={"text": question})
-    if change_key is not None:
-        erp.append_case_event(principal, case_id, kind="staged", payload={"change_key": change_key})
     if criterion is not None:
         erp.append_case_event(
             principal, case_id, kind="escalated", payload={"criterion": criterion}

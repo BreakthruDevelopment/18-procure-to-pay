@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from p2p.core.access import Principal
 from p2p.core.erp import Erp
-from p2p.disputes.context import EVENT_WINDOW, load_facts, render_transcript, roll_summary
+from p2p.disputes.context import (
+    EVENT_WINDOW,
+    READ_RESULT_CAP,
+    SUMMARY_CAP,
+    load_facts,
+    read_result_payload,
+    render_transcript,
+    roll_summary,
+)
 from p2p.disputes.schema import TRANSCRIPT_CAP
 
 
@@ -42,6 +50,58 @@ def test_a_rolling_summary_is_replaced_not_appended_past_the_cap() -> None:
     second = roll_summary(first, "propose_credit", "the credit exceeds 2,500")
     assert first in second
     assert "propose_credit" in second
-    long_head = "x" * 3990
+    # Over the cap, not exactly at it: `"x" * 3990 + " | step: y"` is exactly 4,000, so the
+    # slice removed nothing and the test passed with the cap deleted.
+    long_head = "x" * 4100
     rolled = roll_summary(long_head, "step", "y")
-    assert len(rolled) == 4000
+    assert len(rolled) == SUMMARY_CAP
+    # The NEW line survives and the oldest history is what falls off. Cutting a prefix instead
+    # froze the summary: three successive rolls each returned the same 4,000 characters and
+    # none of them contained its own line.
+    assert rolled.endswith("step: y")
+    once = roll_summary("y" * 4100, "step", "one")
+    twice = roll_summary(once, "step", "two")
+    thrice = roll_summary(twice, "step", "three")
+    assert len(twice) == SUMMARY_CAP
+    assert twice.endswith("step: two")
+    assert thrice.endswith("step: three")
+    assert twice != once
+    assert thrice != twice
+    # A single line longer than the cap is still kept, cut to the cap.
+    huge = roll_summary(None, "step", "z" * 5000)
+    assert len(huge) == SUMMARY_CAP
+
+
+def test_a_transcript_over_the_cap_is_truncated_to_the_cap(erp: Erp, disputes: Principal) -> None:
+    """The cap was asserted as a constant only; removing the truncation entirely survived. And
+    `text[:CAP - 22]` plus a 23-character marker returned 12,001 — one over the cap."""
+    for _ in range(EVENT_WINDOW + 2):
+        erp.append_case_event(disputes, "DC-0001", kind="note", payload={"n": "x" * 3000})
+    erp.set_case_summary(disputes, "DC-0001", "s" * 3000)
+    facts = load_facts(erp, disputes, "DC-0001")
+    text = render_transcript(facts)
+    assert len(text) > TRANSCRIPT_CAP - 200  # the fixture really is over the cap
+    assert len(text) == TRANSCRIPT_CAP
+    assert text.endswith("[transcript truncated]")
+
+
+def test_a_read_result_is_recorded_bounded(erp: Erp, disputes: Principal) -> None:
+    """What a read returned is recorded for the next step, but never unbounded."""
+    small = read_result_payload("get_invoice", {"id": "INV-1013", "po_ref": "PO-1005"})
+    assert small["tool"] == "get_invoice"
+    assert "PO-1005" in str(small["result"])
+    big = read_result_payload("find_supplier", {"items": ["z" * 5000]})
+    result = big["result"]
+    assert isinstance(result, str)
+    assert len(result) == READ_RESULT_CAP
+    assert result.endswith("…[cut]")
+    assert READ_RESULT_CAP * EVENT_WINDOW < TRANSCRIPT_CAP
+
+
+def test_the_rolling_summary_is_what_the_model_is_sent(erp: Erp, disputes: Principal) -> None:
+    """A summary that never reaches the transcript is not context preservation."""
+    erp.set_case_summary(disputes, "DC-0001", "earlier: the supplier claims a short delivery")
+    facts = load_facts(erp, disputes, "DC-0001")
+    text = render_transcript(facts)
+    assert "earlier: the supplier claims a short delivery" in text
+    assert "Rolling summary:" in text

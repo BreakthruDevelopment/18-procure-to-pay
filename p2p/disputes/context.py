@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from agent_container.core.fence import check_nonce
+from pydantic import JsonValue
 
 from p2p.core.access import Principal
 from p2p.core.erp import CaseEvent, DisputeCase, Erp, Invoice, PurchaseOrder, Supplier
@@ -22,6 +23,11 @@ from p2p.disputes.schema import TRANSCRIPT_CAP
 
 SUMMARY_CAP = 4000
 EVENT_WINDOW = 10
+#: How much of a read's own result is recorded on the case, so the next step's model sees what
+#: was read. Ten of these still leave room for the summary inside `TRANSCRIPT_CAP`.
+READ_RESULT_CAP = 600
+_TRUNCATED = "\n[transcript truncated]"
+_RESULT_TRUNCATED = "…[cut]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +98,9 @@ def render_transcript(facts: CaseFacts) -> str:
     text = "\n".join(parts)
     if len(text) <= TRANSCRIPT_CAP:
         return text
-    return text[: TRANSCRIPT_CAP - 22] + "\n[transcript truncated]"
+    # Measured from the marker, not written out: `TRANSCRIPT_CAP - 22` plus a 23-character
+    # marker returned 12,001, one over the cap this function exists to hold.
+    return text[: TRANSCRIPT_CAP - len(_TRUNCATED)] + _TRUNCATED
 
 
 def fence_transcript(text: str, nonce: str | None = None) -> tuple[str, str]:
@@ -107,11 +115,36 @@ def fence_transcript(text: str, nonce: str | None = None) -> tuple[str, str]:
 
 
 def roll_summary(previous: str | None, kind: str, detail: str) -> str:
-    """Replace the rolling summary with a short line for this step, keeping a prefix of the last."""
+    """Replace the rolling summary with a line for this step, keeping the TAIL of the last.
+
+    Cutting a prefix off the joined text dropped the newest line first: from a head already at
+    the cap, three successive calls each returned the same 4,000 characters and none of them
+    contained its own new line, so the summary froze and stopped being rolling at all. The new
+    line always survives; what falls off is the oldest history.
+    """
     head = previous.strip() if previous else ""
     line = f"{kind}: {detail}"
-    text = f"{head} | {line}" if head else line
-    return text[:SUMMARY_CAP]
+    if len(line) >= SUMMARY_CAP:
+        return line[-SUMMARY_CAP:]
+    if not head:
+        return line
+    room = SUMMARY_CAP - len(line) - 3  # the " | " separator
+    if room <= 0:
+        return line
+    return f"{head[-room:]} | {line}"
+
+
+def read_result_payload(tool: str, body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """A bounded record of what a read returned, so the next step's model can see it.
+
+    Without this a read's result was discarded: the step event recorded only the action, so a
+    model that read an invoice was never told the total or the PO it had just asked for, and the
+    written loop criterion could never fire because every repeat read counted as new facts.
+    """
+    text = _payload_text(body)
+    if len(text) > READ_RESULT_CAP:
+        text = text[: READ_RESULT_CAP - len(_RESULT_TRUNCATED)] + _RESULT_TRUNCATED
+    return {"tool": tool, "result": text}
 
 
 def _event_line(event: CaseEvent) -> str:
@@ -128,10 +161,12 @@ def _payload_text(payload: Mapping[str, object]) -> str:
 
 __all__ = [
     "EVENT_WINDOW",
+    "READ_RESULT_CAP",
     "SUMMARY_CAP",
     "CaseFacts",
     "fence_transcript",
     "load_facts",
+    "read_result_payload",
     "render_transcript",
     "roll_summary",
 ]

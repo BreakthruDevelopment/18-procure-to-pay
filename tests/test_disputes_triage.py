@@ -11,8 +11,9 @@ from pydantic import JsonValue
 
 from p2p.core.access import Principal
 from p2p.core.erp import CaseState, Decision, Erp, InvoiceState
-from p2p.core.errors import AccessDenied, ValidationFailed
+from p2p.core.errors import AccessDenied, TransientFailure, ValidationFailed
 from p2p.disputes.commands import format_step, open_case, run_step_with
+from p2p.disputes.context import CaseFacts, load_facts
 from p2p.disputes.prompt import system_prompt
 from p2p.disputes.schema import SCHEMA_TOOL, Criterion, NextAction
 
@@ -227,6 +228,145 @@ def test_another_agents_case_is_not_visible(erp: Erp, disputes: Principal) -> No
 
 
 def test_a_mismatched_tool_choice_is_a_failed_attempt(erp: Erp, disputes: Principal) -> None:
-    provider = _provider(_reply(next_action="propose_credit", tool_choice="get_invoice", amount=1))
+    # Everything else about this payload is valid — amount, currency and reason are all
+    # present — so the only rule that can refuse it is `tool_choice` naming the wrong tool.
+    # With `amount=1` alone it also broke the completeness rule, and the test passed with the
+    # tool_choice check deleted: exercise 2.3's forced next-action choice had no live test.
+    provider = _provider(
+        _reply(
+            next_action="propose_credit",
+            tool_choice="get_invoice",
+            amount=1,
+            currency="USD",
+            reason="short delivery",
+            draft_reply="Proposing a credit.",
+        )
+    )
     with pytest.raises(ValidationFailed, match="did not call the dispute_step schema tool"):
         run_step_with(erp, disputes, "DC-0001", provider)
+    # The same payload with the right tool name is accepted, so the refusal is the name only.
+    accepted = run_step_with(
+        erp,
+        disputes,
+        "DC-0001",
+        _provider(
+            _reply(
+                next_action="propose_credit",
+                tool_choice="issue_credit_memo",
+                amount=1,
+                currency="USD",
+                reason="short delivery",
+                draft_reply="Proposing a credit.",
+            )
+        ),
+    )
+    assert accepted.change_key is not None
+
+
+def _read_invoice(**fields: object) -> ModelResponse:
+    payload: dict[str, object] = {
+        "next_action": "read_invoice",
+        "tool_choice": "get_invoice",
+        "draft_reply": "Reading the invoice before replying.",
+        "question": None,
+    }
+    payload.update(fields)
+    return _reply(**payload)
+
+
+def test_a_read_step_cannot_escalate_on_an_amount_the_model_named(
+    erp: Erp, disputes: Principal
+) -> None:
+    """The model's `amount` is a fact about a credit it proposes, not about a read.
+
+    `DC-0001` matches none of the five criteria. Before this was narrowed, a `read_invoice`
+    step carrying `amount` above the 2,500 limit escalated with "the credit exceeds 2,500",
+    wrote that reason onto the case, and staged nothing — model-controlled input deciding a
+    recorded escalation.
+    """
+    outcome = run_step_with(erp, disputes, "DC-0001", _provider(_read_invoice(amount=400_000)))
+    assert outcome.escalate is None
+    assert outcome.case.state is not CaseState.ESCALATED
+    assert outcome.case.escalated_reason is None
+    assert outcome.change_key is None
+    kinds = [event.kind for event in erp.list_case_events(disputes, "DC-0001", limit=20)]
+    assert "escalated" not in kinds
+
+
+def test_a_read_result_reaches_the_next_steps_model(erp: Erp, disputes: Principal) -> None:
+    """A read must put what it read where the next step can see it (the task's input is the
+    transcript plus tool results). `PO-1005` and the total appear nowhere in the seed's note."""
+    seeded = system_prompt(CaseState.OPEN)
+    assert "PO-1005" not in seeded
+    first = run_step_with(erp, disputes, "DC-0001", _provider(_read_invoice()))
+    assert first.new_facts is True
+    next_provider = _provider(_reply())
+    run_step_with(erp, disputes, "DC-0001", next_provider)
+    sent = next_provider.requests[0].system
+    assert "PO-1005" in sent
+    assert "60000" in sent
+
+
+def test_a_repeated_read_is_not_new_facts_and_the_loop_criterion_fires(
+    erp: Erp, disputes: Principal
+) -> None:
+    """ "Looped twice without new facts" was unreachable on a read-only loop: every repeat of
+    the same read counted as progress, so six identical reads escalated nothing."""
+    first = run_step_with(erp, disputes, "DC-0001", _provider(_read_invoice()))
+    assert first.new_facts is True
+    second = run_step_with(erp, disputes, "DC-0001", _provider(_read_invoice()))
+    assert second.new_facts is False
+    assert second.escalate is None
+    third = run_step_with(erp, disputes, "DC-0001", _provider(_read_invoice()))
+    assert third.new_facts is False
+    fourth = run_step_with(erp, disputes, "DC-0001", _provider(_read_invoice()))
+    assert fourth.escalate == Criterion.LOOPED.value
+    assert fourth.case.escalated_reason == Criterion.LOOPED.value
+
+
+def test_a_staged_key_survives_a_failure_after_the_write(
+    erp: Erp, disputes: Principal, approver: Principal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The staged row is committed by the gateway call. Everything after it is another
+    database call that can fail transiently, and a credit whose key was printed nowhere would
+    be staged a second time by the retry. The key reaches the transcript as soon as it exists.
+    """
+    import p2p.disputes.triage as triage
+
+    real = load_facts
+    calls = {"n": 0}
+
+    def flaky(erp_arg: Erp, principal_arg: Principal, case_id: str) -> CaseFacts:
+        calls["n"] += 1
+        if calls["n"] > 1:  # the reload after the gateway staged the credit
+            raise TransientFailure("the ERP was busy")
+        return real(erp_arg, principal_arg, case_id)
+
+    monkeypatch.setattr(triage, "load_facts", flaky)
+    with pytest.raises(TransientFailure):
+        run_step_with(
+            erp,
+            disputes,
+            "DC-0001",
+            _provider(
+                _reply(
+                    next_action="propose_credit",
+                    tool_choice="issue_credit_memo",
+                    amount=1_000,
+                    currency="USD",
+                    reason="short delivery",
+                    draft_reply="Proposing a credit.",
+                )
+            ),
+        )
+    staged = [
+        event
+        for event in erp.list_case_events(disputes, "DC-0001", limit=20)
+        if event.kind == "staged"
+    ]
+    assert len(staged) == 1
+    key = staged[0].payload["change_key"]
+    assert isinstance(key, str)
+    assert key.startswith("crd_")
+    # And it is a change an approver can actually reach.
+    assert any(change.change_key == key for change in erp.list_staged(approver))

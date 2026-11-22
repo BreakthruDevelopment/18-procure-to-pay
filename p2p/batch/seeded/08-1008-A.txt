@@ -1,0 +1,10 @@
+PEAKLINE ELECTRICAL
+Accounts receivable
+Invoice No. 1008-A
+Invoice date: 2026-11-11
+Purchase order: PO-1008
+
+Qty  Description                          Unit price       Amount
+60   Cable gland, M20                           4.50       270.00
+
+                         Total USD          270.00

@@ -1,0 +1,10 @@
+NORTHWIND FASTENERS
+Accounts receivable
+Invoice No. 1012-A
+Invoice date: 2026-11-13
+Purchase order: PO-1012
+
+Qty  Description                          Unit price       Amount
+30   Threaded rod, M12                         33.00       990.00
+
+                         Total USD          990.00

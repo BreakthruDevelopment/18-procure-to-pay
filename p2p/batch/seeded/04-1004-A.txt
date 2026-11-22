@@ -1,0 +1,10 @@
+CALDER INDUSTRIAL
+Accounts receivable
+Invoice No. 1004-A
+Invoice date: 2026-11-09
+Purchase order: PO-1004
+
+Qty  Description                          Unit price       Amount
+10   Gearbox assembly, 4:1                    550.00     5,500.00
+
+                         Total USD          5,500.00

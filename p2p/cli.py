@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from p2p import __version__
+from p2p.batch.run import add_parser as add_batch_parser
 from p2p.disputes.commands import add_parser as add_dispute_parser
 from p2p.extract.ingest import add_parser as add_ingest_parser
 from p2p.match.commands import add_parser as add_match_parser
@@ -17,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     # Every subcommand, and in one place: each slice rewrote this function for its own
     # command, so a resolution keeping one side alone silently deletes the others.
+    add_batch_parser(subparsers)
     add_dispute_parser(subparsers)
     add_ingest_parser(subparsers)
     add_match_parser(subparsers)

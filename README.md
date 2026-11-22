@@ -11,7 +11,8 @@ back capped and paged. Write tools record a staged change and return its `change
 An approver applies a staged change as a second principal. `p2p ingest` extracts one invoice, `p2p match`
 runs the fixed four-step match and may stage a posting, and `p2p staged`, `p2p review` and `p2p approve`
 list, show and decide a posting, a credit memo or a payment hold. `p2p dispute` runs the supplier desk.
-Batch runs and the recorded demo arrive in later slices.
+`p2p batch` ingests and matches every document in a folder, isolates each failure, and prints one
+summary. The recorded demo arrives in a later slice.
 
 ```bash
 p2p-erp --database erp.sqlite3 --subject svc-app19 --role service --company-code 1000

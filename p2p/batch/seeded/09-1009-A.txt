@@ -1,0 +1,10 @@
+ANSELM CASTINGS
+Accounts receivable
+Invoice No. 1009-A
+Invoice date: 2026-11-12
+Purchase order: PO-1009
+
+Qty  Description                          Unit price       Amount
+8    Cast housing, grey iron                  250.00     2,000.00
+
+                         Total USD          2,000.00

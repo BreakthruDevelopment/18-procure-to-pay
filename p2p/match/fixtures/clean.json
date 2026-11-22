@@ -1,0 +1,49 @@
+{
+  "description": "Recorded invoice-match replies for the clean Northwind invoice INV-1001.",
+  "replies": [
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "fetch-po",
+          "name": "get_purchase_order",
+          "input": {"po_id": "PO-1001"}
+        }
+      ],
+      "usage": {"input_tokens": 400, "output_tokens": 20}
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "fetch-gr",
+          "name": "get_goods_receipt",
+          "input": {"po_id": "PO-1001"}
+        }
+      ],
+      "usage": {"input_tokens": 420, "output_tokens": 20}
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "match",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": false,
+            "why": "match",
+            "po_id": "PO-1001",
+            "supplier_id": "SUP-1001"
+          }
+        }
+      ],
+      "usage": {"input_tokens": 900, "output_tokens": 40}
+    }
+  ]
+}

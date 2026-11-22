@@ -1,0 +1,24 @@
+{
+  "description": "Recorded invoice-match reply for INV-1011, which names no purchase order.",
+  "replies": [
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "no_po",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": true,
+            "why": "no purchase order",
+            "supplier_id": "SUP-1006"
+          }
+        }
+      ],
+      "usage": {"input_tokens": 500, "output_tokens": 30}
+    }
+  ]
+}

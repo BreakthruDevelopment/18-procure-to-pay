@@ -1,0 +1,51 @@
+{
+  "description": "Recorded invoice-match replies for INV-1002, twelve units over its goods receipt.",
+  "replies": [
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "fetch-po",
+          "name": "get_purchase_order",
+          "input": {"po_id": "PO-1002"}
+        }
+      ],
+      "usage": {"input_tokens": 400, "output_tokens": 20}
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "fetch-gr",
+          "name": "get_goods_receipt",
+          "input": {"po_id": "PO-1002"}
+        }
+      ],
+      "usage": {"input_tokens": 420, "output_tokens": 20}
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "variance",
+            "variances": [
+              {"kind": "quantity", "line_no": 1, "expected": 38, "actual": 50}
+            ],
+            "confidence": 0.99,
+            "needs_human": true,
+            "why": "quantity variance",
+            "po_id": "PO-1002",
+            "supplier_id": "SUP-1001"
+          }
+        }
+      ],
+      "usage": {"input_tokens": 900, "output_tokens": 50}
+    }
+  ]
+}

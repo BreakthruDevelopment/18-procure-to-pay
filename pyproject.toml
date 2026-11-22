@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 p2p = "p2p.cli:main"
+p2p-erp = "p2p.mcp.server:main"
 
 [tool.uv.sources]
 agent-container = { git = "https://github.com/BreakthruDevelopment/17-agent-container", tag = "v0.1.0" }

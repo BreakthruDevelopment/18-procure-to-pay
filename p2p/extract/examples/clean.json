@@ -1,0 +1,27 @@
+{
+  "supplier_name": "Northwind Fasteners",
+  "po_ref": "PO-1001",
+  "number": "1001-A",
+  "date": "2026-11-08",
+  "currency": "USD",
+  "total": 125000,
+  "lines": [
+    {
+      "line_no": 1,
+      "description": "M8 hex bolts, zinc",
+      "qty": 100,
+      "unit_price": 1250,
+      "tax": 0
+    }
+  ],
+  "confidence": {
+    "supplier_name": 0.99,
+    "po_ref": 0.99,
+    "number": 0.99,
+    "date": 0.99,
+    "currency": 0.99,
+    "total": 0.99,
+    "lines": 0.99
+  },
+  "unreadable": []
+}

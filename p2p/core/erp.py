@@ -743,6 +743,14 @@ class Erp:
         `COMMIT` is inside the `try`: a commit that fails leaves a transaction open, and the caller
         would be handed the failure with the lock still held.
 
+        **The value an accessor returns is read inside the block too**, not after it. A read made
+        after the commit can be blocked by a lock another connection has taken in between, and it
+        would then raise `TransientFailure` on a write that had already committed -- telling the
+        caller in so many words that retrying is safe when retrying would stage a second credit.
+        Read inside, a failure in the response read rolls the write back with it, so the guarantee
+        `AGENTS.md` makes about `TransientFailure` -- nothing committed, safe to retry -- stays true
+        of every write accessor here.
+
         A contended database is turned into `TransientFailure` here rather than escaping as a driver
         exception. `AGENTS.md` says the category is decided by the class raised, never at the call
         site, and the CLI path has no adapter to catch one for it -- slice 18.7 must be able to turn
@@ -1265,7 +1273,8 @@ class Erp:
                     ),
                     "the invoice changed state while this transition was being made",
                 )
-        return self.get_invoice(principal, invoice_id)
+            updated = self._invoice(principal, self._invoice_row(principal, invoice_id))
+        return updated
 
     @staticmethod
     def _check_caller_transition(current: InvoiceState, to_state: InvoiceState) -> None:
@@ -1323,7 +1332,8 @@ class Erp:
                 ),
                 "the invoice changed state while this posting was being staged",
             )
-        return self._staged_row(ChangeKind.POSTING, self._change_row(principal, key))
+            staged = self._staged_row(ChangeKind.POSTING, self._change_row(principal, key))
+        return staged
 
     def stage_credit_memo(
         self,
@@ -1385,7 +1395,8 @@ class Erp:
                     staged_at,
                 ),
             )
-        return self._staged_row(ChangeKind.CREDIT_MEMO, self._change_row(principal, key))
+            staged = self._staged_row(ChangeKind.CREDIT_MEMO, self._change_row(principal, key))
+        return staged
 
     def stage_payment_hold(
         self,
@@ -1434,7 +1445,8 @@ class Erp:
                     staged_at,
                 ),
             )
-        return self._staged_row(ChangeKind.PAYMENT_HOLD, self._change_row(principal, key))
+            staged = self._staged_row(ChangeKind.PAYMENT_HOLD, self._change_row(principal, key))
+        return staged
 
     def open_case(
         self, principal: Principal, *, supplier_id: str, invoice_id: str | None = None
@@ -1468,7 +1480,8 @@ class Erp:
                     opened_at,
                 ),
             )
-        return self.get_case(principal, case_id)
+            opened = self.get_case(principal, case_id)
+        return opened
 
     def advance_case(
         self,
@@ -1514,7 +1527,8 @@ class Erp:
                     (to_state, why, case_id, current),
                 )
             _one_row_changed(changed, "the case changed state while this step was being made")
-        return self.get_case(principal, case_id)
+            advanced = self.get_case(principal, case_id)
+        return advanced
 
     def set_case_summary(self, principal: Principal, case_id: str, summary: str) -> DisputeCase:
         """Replace a case's rolling summary (statement 5.1).
@@ -1528,7 +1542,8 @@ class Erp:
             row = self._case_row(principal, case_id)
             assert_can(principal, Action.ADVANCE_CASE, _owner(row))
             conn.execute("UPDATE dispute_case SET summary = ? WHERE id = ?", (text, case_id))
-        return self.get_case(principal, case_id)
+            summarized = self.get_case(principal, case_id)
+        return summarized
 
     def append_case_event(
         self, principal: Principal, case_id: str, *, kind: str, payload: Mapping[str, object]
@@ -1602,7 +1617,8 @@ class Erp:
                     body,
                 ),
             )
-        return self.get_batch_run(principal, run_id)
+            recorded = self.get_batch_run(principal, run_id)
+        return recorded
 
     # -- the one apply path ---------------------------------------------------------------------
 
@@ -1647,6 +1663,7 @@ class Erp:
                     (decision.encode(), principal.subject, decided_at, existing.change_key),
                 )
                 self._apply_state_effect(conn, kind, existing, decision)
+                settled_state = self._state_of(existing.invoice_id)
         except sqlite3.IntegrityError:
             # The apply-once trigger. Another decision landed between the read above and this
             # write; the database refused ours and rolled it back, so report what is recorded.
@@ -1667,7 +1684,7 @@ class Erp:
             decision=decision,
             already_decided=False,
             detail=f"{decision.kind} {existing.summary}",
-            invoice_state=self._state_of(existing.invoice_id),
+            invoice_state=settled_state,
         )
 
     def _apply_state_effect(

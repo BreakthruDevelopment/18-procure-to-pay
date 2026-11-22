@@ -83,6 +83,11 @@ later slice is most likely to break by accident:
   `MAX(seq) + 1` give the second `UNIQUE constraint failed` out of a write accessor. And **never map
   `sqlite3.IntegrityError`** the way a lock is mapped: `apply_change` needs it to escape `_write`,
   because that is how the apply-once trigger becomes the stated no-op.
+- **A write accessor reads its own return value inside its transaction, never after the commit.**
+  A post-commit read can be blocked by a lock taken in between, and would then raise
+  `TransientFailure` on a write that had already committed -- which, given the rule below, tells
+  the caller retrying is safe when retrying would stage a second credit. Read inside, a failure in
+  the response read rolls the write back with it, and the rule stays true.
 - **A retried write is not idempotent, and nothing here deduplicates a staged change.** Two
   identical credits stage as two rows and can both be approved. The control is that applying each
   needs a second principal, and `p2p staged` shows them side by side -- but a write tool now reports

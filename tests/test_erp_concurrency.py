@@ -28,8 +28,10 @@ import pytest
 
 from p2p.core.access import Principal, Role
 from p2p.core.erp import (
+    BatchRun,
     CaseState,
     Decision,
+    DisputeCase,
     Erp,
     InvoiceState,
     _one_row_changed,
@@ -510,3 +512,81 @@ def test_a_duplicate_change_key_is_refused_by_the_schema_and_rolls_the_write_bac
         ]
         == "matched"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# A write accessor's own response is read inside its transaction
+# ---------------------------------------------------------------------------------------------
+#
+# Otherwise a lock taken between the commit and the response read raises `TransientFailure` on a
+# write that has already committed -- and `AGENTS.md` tells the caller in so many words that a
+# `TransientFailure` means nothing committed and is safe to retry. Codex reproduced the
+# consequence: the failed call left one credit, and retrying the same arguments created a second.
+#
+# Each test makes the response read fail and asserts the write is not there afterwards. The failure
+# is injected rather than raced because the window is between a commit and the next statement.
+
+
+def test_a_failed_response_read_takes_the_staged_write_with_it(
+    erp: Erp, disputes: Principal, monkeypatch: pytest.MonkeyPatch, plain: sqlite3.Connection
+) -> None:
+    def blocked(_self: Erp, _principal: Principal, _change_key: str) -> sqlite3.Row:
+        raise TransientFailure("the ERP was busy; this can be tried again")
+
+    monkeypatch.setattr(Erp, "_change_row", blocked)
+    with pytest.raises(TransientFailure):
+        erp.stage_credit_memo(
+            disputes, supplier_id="SUP-1003", amount=1000, currency="USD", reason="x"
+        )
+    # Nothing committed, so the caller may retry on the strength of the category it was given.
+    assert plain.execute("SELECT COUNT(*) AS n FROM credit_memo").fetchone()["n"] == 0
+
+
+def test_a_failed_response_read_takes_a_state_change_with_it(
+    erp: Erp, monkeypatch: pytest.MonkeyPatch, plain: sqlite3.Connection
+) -> None:
+    clerk = _clerk()
+    calls: list[int] = []
+    real = Erp._invoice_row
+
+    def blocked_on_the_second_read(self: Erp, principal: Principal, invoice_id: str) -> sqlite3.Row:
+        calls.append(1)
+        if len(calls) > 1:  # the first read is the accessor's check; the second is its response
+            raise TransientFailure("the ERP was busy; this can be tried again")
+        return real(self, principal, invoice_id)
+
+    monkeypatch.setattr(Erp, "_invoice_row", blocked_on_the_second_read)
+    with pytest.raises(TransientFailure):
+        erp.advance_invoice(clerk, BATCH_INVOICE, InvoiceState.EXTRACTED)
+    assert (
+        plain.execute("SELECT state FROM invoice WHERE id = ?", (BATCH_INVOICE,)).fetchone()[
+            "state"
+        ]
+        == "received"
+    )
+
+
+def test_a_failed_response_read_takes_a_new_case_with_it(
+    erp: Erp, disputes: Principal, monkeypatch: pytest.MonkeyPatch, plain: sqlite3.Connection
+) -> None:
+    before = plain.execute("SELECT COUNT(*) AS n FROM dispute_case").fetchone()["n"]
+
+    def blocked(_self: Erp, _principal: Principal, _case_id: str) -> DisputeCase:
+        raise TransientFailure("the ERP was busy; this can be tried again")
+
+    monkeypatch.setattr(Erp, "get_case", blocked)
+    with pytest.raises(TransientFailure):
+        erp.open_case(disputes, supplier_id="SUP-1001")
+    assert plain.execute("SELECT COUNT(*) AS n FROM dispute_case").fetchone()["n"] == before
+
+
+def test_a_failed_response_read_takes_a_batch_run_with_it(
+    erp: Erp, monkeypatch: pytest.MonkeyPatch, plain: sqlite3.Connection
+) -> None:
+    def blocked(_self: Erp, _principal: Principal, _run_id: str) -> BatchRun:
+        raise TransientFailure("the ERP was busy; this can be tried again")
+
+    monkeypatch.setattr(Erp, "get_batch_run", blocked)
+    with pytest.raises(TransientFailure):
+        erp.record_batch_run(_clerk(), items=1, ok=1, failed=0, skipped=0, summary={})
+    assert plain.execute("SELECT COUNT(*) AS n FROM batch_run").fetchone()["n"] == 0

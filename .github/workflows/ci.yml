@@ -30,11 +30,18 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --frozen
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy --strict
-      - run: uv run pytest
+      # `--locked`, not `--frozen`: `--frozen` installs from the lock WITHOUT checking it still
+      # matches pyproject.toml, so a dependency added and never relocked passes CI and is then
+      # simply absent at deploy, because the Dockerfile installs the locked set. Measured:
+      # adding httpx without relocking left `--frozen` at exit 0 and every step green.
+      - run: uv sync --locked
+      # `--frozen` on each `uv run` too: without it, `uv run` silently REWRITES uv.lock in the
+      # tree and resolves the addition from PyPI, so the job both hides the error and mutates
+      # the file it was meant to be validating.
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen ruff format --check .
+      - run: uv run --frozen mypy --strict
+      - run: uv run --frozen pytest
       - name: Build the package
         run: |
           uv build

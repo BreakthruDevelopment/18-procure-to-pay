@@ -27,7 +27,9 @@ The BreakthruDevelopment org holds other, unrelated applications.
   is not on `main`, stop and comment on the issue. `scripts/run-harness.sh`'s pre-push guard knows only the
   template's TypeScript paths, so in this repo the rule is held by this file, the spec and review.
 - `pyproject.toml`, `uv.lock` and `Dockerfile` are **shared, not foundation.** A slice that adds a dependency edits
-  `pyproject.toml` and relocks (`uv lock`, since CI runs `uv sync --frozen`) and says so on its PR.
+  `pyproject.toml` and relocks (`uv lock`, which CI enforces by running `uv sync --locked`) and says so on
+  its PR. `--frozen` would NOT enforce it: it installs from the lock without checking it still matches
+  `pyproject.toml`.
 - **App 17 (`agent-container`) is pinned by git tag** in `[tool.uv.sources]` (currently `v0.1.0`), never by branch or
   bare commit. A slice that needs something the tag lacks stops and comments on its issue; it does not bump the tag
   or reimplement the contract.
@@ -52,6 +54,8 @@ The BreakthruDevelopment org holds other, unrelated applications.
 
 ## Definition of done (CI enforces most of it)
 
-The required check is named exactly `Lint, test, build, smoke`; a second job is `Container image`. Both must pass:
+The required check is named exactly `Lint, test, build, smoke`; a second job is `Container image`. **Only the
+first is a required context in the ruleset**, so a broken Dockerfile can merge green — check it yourself when you
+touch it. The required job runs:
 `ruff check`, `ruff format --check`, `mypy --strict`, `pytest`, the package builds and imports, and the CLI runs.
 New rules have a test in `tests/`. The README's "What this app does" section is filled in.

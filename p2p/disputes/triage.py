@@ -169,7 +169,8 @@ async def take_step(
             # Progress is decided on a digest of the WHOLE body, never on the text that the
             # cap may have cut: two different invoices whose first 600 characters agree would
             # otherwise read as no progress and could escalate `LOOPED` with a false reason.
-            new_facts = (read_result["tool"], read_result["digest"]) not in _reads_so_far(facts)
+            seen = (str(read_result["tool"]), str(read_result["digest"]))
+            new_facts = seen not in facts.read_digests
 
     if change_key is not None:
         # Everything from here is bookkeeping about a change that is already committed. A
@@ -312,15 +313,6 @@ def _summary_detail(
     if read_result is not None:
         return f"read {read_result.get('tool')}: {read_result.get('result')}"
     return action.value
-
-
-def _reads_so_far(facts: CaseFacts) -> set[tuple[object, object]]:
-    """Every read result already on the case, so a repeat of one is not new facts."""
-    return {
-        (event.payload.get("tool"), event.payload.get("digest"))
-        for event in facts.history
-        if event.kind == "read"
-    }
 
 
 def _resolve_action(

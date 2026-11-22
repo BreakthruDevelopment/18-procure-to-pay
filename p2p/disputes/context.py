@@ -18,7 +18,15 @@ from agent_container.core.fence import check_nonce
 from pydantic import JsonValue
 
 from p2p.core.access import Principal
-from p2p.core.erp import CaseEvent, DisputeCase, Erp, Invoice, PurchaseOrder, Supplier
+from p2p.core.erp import (
+    MAX_PAGE,
+    CaseEvent,
+    DisputeCase,
+    Erp,
+    Invoice,
+    PurchaseOrder,
+    Supplier,
+)
 from p2p.core.errors import AccessDenied
 from p2p.disputes.schema import TRANSCRIPT_CAP
 
@@ -42,6 +50,13 @@ class CaseFacts:
     purchase_order: PurchaseOrder | None
     window: tuple[CaseEvent, ...]
     history: tuple[CaseEvent, ...]
+    #: Case-wide facts, read from the ERP rather than derived from `history`. `history` is the
+    #: newest `MAX_PAGE` events and nothing older, so deriving these from it was right only
+    #: while a case stayed under a hundred events: the one-question rule went back to "no" and
+    #: the desk asked a second question, and the read set lost its older entries. Slice 18.11
+    #: added the two accessors; they answer over the whole case.
+    question_asked: bool = False
+    read_digests: frozenset[tuple[str, str]] = frozenset()
     proposed_amount: int | None = None
 
     @property
@@ -62,10 +77,6 @@ class CaseFacts:
             count += 1
         return count
 
-    @property
-    def question_asked(self) -> bool:
-        return any(event.kind == "question" for event in self.history)
-
     def with_amount(self, amount: int | None) -> CaseFacts:
         return CaseFacts(
             case=self.case,
@@ -74,6 +85,8 @@ class CaseFacts:
             purchase_order=self.purchase_order,
             window=self.window,
             history=self.history,
+            question_asked=self.question_asked,
+            read_digests=self.read_digests,
             proposed_amount=amount,
         )
 
@@ -91,8 +104,19 @@ def load_facts(erp: Erp, principal: Principal, case_id: str) -> CaseFacts:
             except AccessDenied:
                 purchase_order = None
     window = erp.list_case_events(principal, case_id, limit=EVENT_WINDOW)
-    history = erp.list_case_events(principal, case_id, limit=100)
-    return CaseFacts(case, supplier, invoice, purchase_order, window, history)
+    # `history` is the trailing run of step outcomes behind the loop criterion, which is
+    # consecutive and so always inside a page. The two case-wide facts are read as facts.
+    history = erp.list_case_events(principal, case_id, limit=MAX_PAGE)
+    return CaseFacts(
+        case,
+        supplier,
+        invoice,
+        purchase_order,
+        window,
+        history,
+        question_asked=erp.case_has_question(principal, case_id),
+        read_digests=erp.case_read_digests(principal, case_id),
+    )
 
 
 def render_transcript(facts: CaseFacts) -> str:

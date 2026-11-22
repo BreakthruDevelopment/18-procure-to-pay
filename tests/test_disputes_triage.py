@@ -10,7 +10,7 @@ from agent_container.core.replay import ReplayProvider
 from pydantic import JsonValue
 
 from p2p.core.access import Principal
-from p2p.core.erp import CaseState, Decision, Erp, InvoiceState
+from p2p.core.erp import MAX_PAGE, CaseState, Decision, Erp, InvoiceState
 from p2p.core.errors import (
     AccessDenied,
     InternalFailure,
@@ -531,3 +531,39 @@ def test_the_rolling_summary_carries_the_facts_not_the_action_names(
     after_credit = erp.get_case(disputes, "DC-0001").summary
     assert after_credit is not None
     assert "crd_000001" in after_credit
+
+
+def _bury(erp: Erp, disputes: Principal, case_id: str) -> None:
+    """More events than any page can return, so a window-bounded fact would go stale."""
+    for n in range(MAX_PAGE + 20):
+        erp.append_case_event(disputes, case_id, kind="note", payload={"n": n})
+
+
+def test_a_second_question_is_not_asked_even_past_the_event_window(
+    erp: Erp, disputes: Principal
+) -> None:
+    """The one-question rule is a case-wide fact now. Derived from the newest hundred events it
+    went back to "no" and the desk asked a second question, which the spec allows one of."""
+    first = run_step_with(erp, disputes, "DC-0001", _provider(_reply()))
+    assert first.question is not None
+    _bury(erp, disputes, "DC-0001")
+    window = erp.list_case_events(disputes, "DC-0001", limit=MAX_PAGE)
+    assert all(event.kind != "question" for event in window)  # the window cannot see it
+    again = run_step_with(
+        erp, disputes, "DC-0001", _provider(_reply(question="And the unit price?"))
+    )
+    assert again.question is None
+
+
+def test_a_repeat_read_is_still_not_new_facts_past_the_event_window(
+    erp: Erp, disputes: Principal
+) -> None:
+    """Same for the read set: a repeat of a read the case already holds is not progress, even
+    when the earlier read has aged out of every reachable page."""
+    first = run_step_with(erp, disputes, "DC-0001", _provider(_read_invoice()))
+    assert first.new_facts is True
+    _bury(erp, disputes, "DC-0001")
+    window = erp.list_case_events(disputes, "DC-0001", limit=MAX_PAGE)
+    assert all(event.kind != "read" for event in window)
+    again = run_step_with(erp, disputes, "DC-0001", _provider(_read_invoice()))
+    assert again.new_facts is False

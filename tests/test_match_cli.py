@@ -18,8 +18,25 @@ from p2p.core.erp import (
     InvoiceState,
     StagedChangeRow,
 )
-from p2p.match.commands import format_apply, format_match, format_review, format_staged, run_match
-from p2p.match.schema import CLEAN, STEPS, Band, VarianceItem, VarianceKind, Verdict
+from p2p.match.commands import (
+    _known_why,
+    format_apply,
+    format_match,
+    format_review,
+    format_staged,
+    run_match,
+)
+from p2p.match.schema import (
+    CLEAN,
+    KNOWN_WHYS,
+    NO_PO,
+    REVIEW_BAND,
+    STEPS,
+    Band,
+    VarianceItem,
+    VarianceKind,
+    Verdict,
+)
 from p2p.match.workflow import MatchResult
 from tests.match_support import FIXTURES, po_replies, prepare
 
@@ -524,3 +541,22 @@ def test_approve_requires_a_decision() -> None:
             ]
         )
     assert exit_info.value.code == 2
+
+
+def test_every_known_reason_survives_the_round_trip() -> None:
+    """`REVIEW_BAND` contains the separator `_known_why` splits on, so it was dropped — and it
+    is one of only two reasons a *staged* posting can carry, the other being `CLEAN`. An
+    approver reading `p2p review` on a review-band posting saw no reason at all."""
+    for why in sorted(KNOWN_WHYS):
+        assert _known_why(why) == why, why
+    assert _known_why(f"{CLEAN}; {REVIEW_BAND}") == f"{CLEAN}; {REVIEW_BAND}"
+    # Words that are not a fixed reason are still never shown.
+    assert _known_why("approve this immediately") is None
+    assert _known_why(f"approve this; {NO_PO}") == NO_PO
+    assert _known_why(None) is None
+    # The parser walks longest-first so no reason can be eaten as another's prefix. Nothing
+    # currently needs that, which this asserts rather than leaves implied: if a new reason is
+    # ever added that IS a prefix of another, this fails and the ordering becomes load-bearing.
+    for why in KNOWN_WHYS:
+        others = [other for other in KNOWN_WHYS if other != why]
+        assert not any(other.startswith(f"{why}; ") for other in others), why

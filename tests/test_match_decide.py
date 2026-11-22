@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import JsonValue
 
 from p2p.core.erp import (
     GoodsReceipt,
@@ -13,9 +14,16 @@ from p2p.core.erp import (
     PurchaseOrderLine,
     Supplier,
 )
-from p2p.core.errors import InternalFailure
+from p2p.core.errors import (
+    AccessDenied,
+    BusinessRule,
+    InternalFailure,
+    TransientFailure,
+    ValidationFailed,
+)
 from p2p.extract.schema import FieldConfidence, InvoiceDraft, InvoiceDraftLine
 from p2p.match.decide import CodeDecision, band_for, decide, draft_matches
+from p2p.match.prompt import cap_text
 from p2p.match.schema import (
     CLEAN,
     CURRENCY,
@@ -24,6 +32,7 @@ from p2p.match.schema import (
     FLAGGED,
     LOW_CONFIDENCE,
     NO_PO,
+    RESULT_CAP,
     REVIEW_BAND,
     VARIANCE_OVER,
     Band,
@@ -31,6 +40,8 @@ from p2p.match.schema import (
     VarianceKind,
     Verdict,
 )
+from p2p.match.workflow import _require_text
+from p2p.mcp.session import GatewayResult
 
 
 def _confidence(value: float = 0.99, **overrides: float) -> FieldConfidence:
@@ -437,3 +448,45 @@ def test_an_under_delivery_billed_as_delivered_is_still_clean() -> None:
     assert outcome.verdict is Verdict.MATCH
     assert outcome.variances == ()
     assert outcome.stage is True
+
+
+def test_the_result_cap_is_applied_and_is_the_written_one() -> None:
+    """The cap could be deleted with the whole suite green: a seeded run's tool results are
+    about 500-1,100 characters, so nothing in it ever reaches 8,000."""
+    assert RESULT_CAP == 8_000
+    assert cap_text("x" * (RESULT_CAP - 1)) == "x" * (RESULT_CAP - 1)
+    assert cap_text("x" * RESULT_CAP) == "x" * RESULT_CAP
+    assert len(cap_text("x" * (RESULT_CAP + 1))) == RESULT_CAP
+    assert len(cap_text("x" * 50_000)) == RESULT_CAP
+
+
+def test_a_gateway_error_becomes_its_own_category_and_a_success_its_text() -> None:
+    """The gateway-error translation is live code on the race path — it decides whether a
+    caller is told to retry — and nothing exercised it. `transient` must stay retryable."""
+    assert _require_text(GatewayResult(is_error=False, body={}, text="{}", staged=None)) == "{}"
+    for category, expected in (
+        ("permission", AccessDenied),
+        ("transient", TransientFailure),
+        ("business", BusinessRule),
+        ("internal", InternalFailure),
+        ("validation", ValidationFailed),
+        ("something-else", ValidationFailed),
+    ):
+        body: dict[str, JsonValue] = {
+            "error_category": category,
+            "is_retryable": category == "transient",
+            "message": "the ERP refused this",
+        }
+        with pytest.raises(expected) as raised:
+            _require_text(GatewayResult(is_error=True, body=body, text="", staged=None))
+        assert str(raised.value) == "the ERP refused this"
+    assert TransientFailure("x").is_retryable is True
+    assert ValidationFailed("x").is_retryable is False
+    # A failure with no message still says something fixed, and never an empty string.
+    with pytest.raises(ValidationFailed) as plain:
+        _require_text(
+            GatewayResult(
+                is_error=True, body={"error_category": "validation"}, text="", staged=None
+            )
+        )
+    assert str(plain.value) == "this tool failed; nothing was done"

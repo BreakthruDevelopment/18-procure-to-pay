@@ -178,13 +178,50 @@ def _variance_line(item: VarianceItem) -> str:
 
 
 def _known_why(text: str | None) -> str | None:
-    """Keep only the fixed reasons. A payload's other words are not shown."""
+    """Keep only the fixed reasons. A payload's other words are not shown.
+
+    The whole string is matched first, because a reason may itself contain the separator:
+    `REVIEW_BAND` does, so splitting dropped it entirely and it was the one member of
+    `KNOWN_WHYS` that round-tripped to `None`. That mattered more than a missing sentence —
+    a posting is staged only when nothing is blocking and the band is not `low`, so a staged
+    posting's reason is either `CLEAN` or `REVIEW_BAND`, and `p2p review` showed no reason at
+    all on exactly the 0.6-0.9 band case whose whole point is to tell an approver which
+    fields to check. A round-trip test over `KNOWN_WHYS` keeps every member honest.
+    """
     if text is None:
         return None
+    whole = _as_known_reasons(text)
+    if whole is not None:
+        return whole
     parts = [part for part in text.split("; ") if part in KNOWN_WHYS]
     if not parts:
         return None
     return "; ".join(parts)
+
+
+def _as_known_reasons(text: str) -> str | None:
+    """`text` as a `"; "`-join of fixed reasons, or None if it is not exactly that.
+
+    Parsed rather than split, because a reason may contain the separator. Longest first, so
+    no reason can be consumed as another's prefix. Returning None falls back to the split,
+    which keeps the rule that a payload's own words are never shown.
+    """
+    order = sorted(KNOWN_WHYS, key=len, reverse=True)
+    found: list[str] = []
+    rest = text
+    while rest:
+        for why in order:
+            if rest == why:
+                found.append(why)
+                rest = ""
+                break
+            if rest.startswith(f"{why}; "):
+                found.append(why)
+                rest = rest[len(why) + 2 :]
+                break
+        else:
+            return None
+    return "; ".join(found) if found else None
 
 
 def _facts(payload: Mapping[str, object] | None) -> PostingFacts | None:

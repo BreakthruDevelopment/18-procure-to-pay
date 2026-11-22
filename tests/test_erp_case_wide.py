@@ -108,3 +108,42 @@ def test_an_approver_may_read_both_in_its_own_company_code(
     erp.append_case_event(disputes, "DC-0001", kind="question", payload={"text": "how many?"})
     assert erp.case_has_question(approver, "DC-0001") is True
     assert erp.case_read_digests(approver, "DC-0001") == frozenset()
+
+
+def test_neither_accessor_answers_from_another_case(erp: Erp, disputes: Principal) -> None:
+    """`_case_row` authorizes the case that was named; the event query is then the only thing
+    keeping another case's rows out of the answer, so `case_id = ?` is an access predicate and
+    not SQL detail. Without it, a case that never asked a question reports that it did — the
+    very defect these accessors exist to remove, arriving from the other side — and a digest
+    set comes back full of pairs the case never read, including from a case the assignee
+    predicate had just refused this principal.
+    """
+    other = erp.open_case(disputes, supplier_id="SUP-1006", invoice_id="INV-1011")
+    erp.append_case_event(disputes, "DC-0001", kind="question", payload={"text": "how many?"})
+    erp.append_case_event(
+        disputes, "DC-0001", kind="read", payload={"tool": "get_invoice", "digest": "abc123"}
+    )
+    assert erp.case_has_question(disputes, other.id) is False
+    assert erp.case_read_digests(disputes, other.id) == frozenset()
+    assert erp.case_has_question(disputes, "DC-0001") is True
+    assert erp.case_read_digests(disputes, "DC-0001") == frozenset({("get_invoice", "abc123")})
+
+
+def test_a_non_read_event_carrying_the_same_keys_is_not_a_read(
+    erp: Erp, disputes: Principal
+) -> None:
+    """`case_event.kind` is free text and the disputes desk writes eight of them, building its
+    `step` payload beside its `read` payload. A future payload that gained `tool` and `digest`
+    must not quietly join the digest set."""
+    for kind in ("step", "note", "escalated", "refused", "staged", "question"):
+        erp.append_case_event(
+            disputes,
+            "DC-0001",
+            kind=kind,
+            payload={"tool": "get_invoice", "digest": f"not-a-read-{kind}"},
+        )
+    assert erp.case_read_digests(disputes, "DC-0001") == frozenset()
+    erp.append_case_event(
+        disputes, "DC-0001", kind="read", payload={"tool": "get_invoice", "digest": "abc123"}
+    )
+    assert erp.case_read_digests(disputes, "DC-0001") == frozenset({("get_invoice", "abc123")})

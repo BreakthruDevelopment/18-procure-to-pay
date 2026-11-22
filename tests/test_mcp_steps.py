@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
 import pytest
 from agent_container.core.interceptors import TURN_CAP_NOTICE
+from agent_container.core.tool import ErrorCategory, Identity, ToolContext, ToolResult
+from pydantic import BaseModel
 
 from p2p.core.access import Principal
 from p2p.core.erp import Erp, InvoiceState
@@ -17,9 +20,17 @@ from p2p.mcp.contract import (
     NOT_IN_MANIFEST,
     PAGE_TOO_LARGE,
 )
+from p2p.mcp.interceptors import RefuseTruncation
 from p2p.mcp.log import JsonLineFormatter
 from p2p.mcp.manifest import manifest_for, tool_choice_for
 from p2p.mcp.session import GatewaySession
+
+
+class _NoArgs(BaseModel):
+    """An interceptor's `args` are untouched by `RefuseTruncation`; it reads the result only."""
+
+
+_CTX = ToolContext(run_id="test", turn=1, tool_use_id="t1", identity=Identity.anonymous())
 
 
 def test_tool_choice_follows_the_step_and_a_forced_name_is_only_a_shape_check(
@@ -147,6 +158,34 @@ def test_a_page_the_turn_cap_cuts_is_an_error_and_not_a_partial_document(
         assert result.body["message"] == PAGE_TOO_LARGE
         assert invoice_id not in result.text
         assert TURN_CAP_NOTICE not in result.text
+
+
+async def _cut_by(result: ToolResult) -> ToolResult:
+    """`RefuseTruncation` alone, so the session's twin branch cannot stand in for it."""
+    return await RefuseTruncation().after("get_invoice", _NoArgs(), _CTX, result)
+
+
+def test_the_truncation_interceptor_keeps_a_cut_failures_category_and_retryability() -> None:
+    cut = asyncio.run(
+        _cut_by(ToolResult.error(ErrorCategory.TRANSIENT, "the ERP was busy" + TURN_CAP_NOTICE))
+    )
+    assert cut.is_error is True
+    assert cut.error_category is ErrorCategory.TRANSIENT
+    assert cut.is_retryable is True
+    assert cut.content == PAGE_TOO_LARGE
+
+    refused = asyncio.run(
+        _cut_by(ToolResult.error(ErrorCategory.PERMISSION, "INV-2001" + TURN_CAP_NOTICE))
+    )
+    assert refused.error_category is ErrorCategory.PERMISSION
+    assert refused.is_retryable is False
+    assert "INV-2001" not in refused.content
+
+    # A cut success is still the caller's page to ask for again.
+    page = asyncio.run(_cut_by(ToolResult.ok("a very long document" + TURN_CAP_NOTICE)))
+    assert page.error_category is ErrorCategory.VALIDATION
+    assert page.is_retryable is False
+    assert page.content == PAGE_TOO_LARGE
 
 
 def test_a_write_the_turn_cap_would_cut_still_returns_its_key(erp: Erp, clerk: Principal) -> None:

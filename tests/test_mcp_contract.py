@@ -131,14 +131,30 @@ def test_a_cut_page_is_replaced_and_a_cut_write_keeps_the_staged_key(
 ) -> None:
     read = GatewaySession(erp, clerk).tool("get_invoice")
     leaked = "INV-2001 secret row"
-    cut = from_tool_result(
-        read,
-        ToolResult.error(ErrorCategory.PERMISSION, leaked + TURN_CAP_NOTICE),
-    )
-    assert cut.error_category == "validation"
-    assert cut.is_retryable is False
-    assert cut.body["message"] == PAGE_TOO_LARGE
-    assert leaked not in cut.text
+
+    # A cut SUCCESS is a page to ask for again, smaller: `validation`, not retryable.
+    page = from_tool_result(read, ToolResult.ok(leaked + TURN_CAP_NOTICE))
+    assert page.error_category == "validation"
+    assert page.is_retryable is False
+    assert page.body["message"] == PAGE_TOO_LARGE
+    assert leaked not in page.text
+
+    # A cut FAILURE keeps the category and retryability it arrived with. Relabelling it
+    # would tell app 19 that a retryable failure is a dead end (statement 2.2) and would
+    # blame a refusal on the caller's input. The cut text still never comes back.
+    for category, retryable in (
+        (ErrorCategory.PERMISSION, False),
+        (ErrorCategory.TRANSIENT, True),
+        (ErrorCategory.BUSINESS, False),
+    ):
+        cut = from_tool_result(
+            read,
+            ToolResult.error(category, leaked + TURN_CAP_NOTICE, retryable=retryable),
+        )
+        assert cut.error_category == category.value
+        assert cut.is_retryable is retryable
+        assert cut.body["message"] == PAGE_TOO_LARGE
+        assert leaked not in cut.text
 
     _match(erp, clerk)
     session = GatewaySession(erp, clerk)

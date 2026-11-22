@@ -60,6 +60,13 @@ class RefuseTruncation(Interceptor):
         cut = result.content == TURN_CAP_OMITTED or result.content.endswith(TURN_CAP_NOTICE)
         if not cut or isinstance(result.staged, StagedErpChange):
             return result
+        if result.is_error and result.error_category is not None:
+            # Keep the failure's own category and retryability; replace only its text. See the
+            # same rule in `session.from_tool_result`: a cut transient failure that came back
+            # as `validation`/not-retryable would stop a caller retrying something it should.
+            return ToolResult.error(
+                result.error_category, PAGE_TOO_LARGE, retryable=result.is_retryable
+            )
         return ToolResult.error(ErrorCategory.VALIDATION, PAGE_TOO_LARGE)
 
 

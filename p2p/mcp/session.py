@@ -141,6 +141,15 @@ def from_tool_result(tool: AnyTool, result: ToolResult) -> GatewayResult:
         # retryable, and the message does not say that nothing was done.
         return _error(ErrorCategory.INTERNAL, WRITE_KEY_MISSING, retryable=False)
     if _cut(result.content):
+        # A cut FAILURE keeps the category and retryability it already had. App 17's
+        # `TurnOutputCap` preserves both when it shortens a result, and discarding them here
+        # would publish a transient ERP lock as a permanent error about the caller's input:
+        # app 19 would be told a retryable failure is a dead end, which is the whole of exam
+        # statement 2.2, and a refused call would be blamed on the arguments. Only the message
+        # is replaced, so the cut text is still never returned. A cut SUCCESS is a page the
+        # caller should ask for again smaller, which is `validation`.
+        if result.is_error and result.error_category is not None:
+            return _error(result.error_category, PAGE_TOO_LARGE, retryable=result.is_retryable)
         return _error(ErrorCategory.VALIDATION, PAGE_TOO_LARGE, retryable=False)
     if result.is_error:
         category = result.error_category

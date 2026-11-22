@@ -11,7 +11,12 @@ from pydantic import JsonValue
 
 from p2p.core.access import Principal
 from p2p.core.erp import CaseState, Decision, Erp, InvoiceState
-from p2p.core.errors import AccessDenied, TransientFailure, ValidationFailed
+from p2p.core.errors import (
+    AccessDenied,
+    InternalFailure,
+    TransientFailure,
+    ValidationFailed,
+)
 from p2p.disputes.commands import format_step, open_case, run_step_with
 from p2p.disputes.context import CaseFacts, load_facts
 from p2p.disputes.prompt import system_prompt
@@ -343,7 +348,9 @@ def test_a_staged_key_survives_a_failure_after_the_write(
         return real(erp_arg, principal_arg, case_id)
 
     monkeypatch.setattr(triage, "load_facts", flaky)
-    with pytest.raises(TransientFailure):
+    # Not an ordinary retryable failure: running the step again would stage a second,
+    # independently approvable credit. The failure names the key and is not retryable.
+    with pytest.raises(InternalFailure) as raised:
         run_step_with(
             erp,
             disputes,
@@ -359,6 +366,7 @@ def test_a_staged_key_survives_a_failure_after_the_write(
                 )
             ),
         )
+    assert raised.value.is_retryable is False
     staged = [
         event
         for event in erp.list_case_events(disputes, "DC-0001", limit=20)
@@ -368,5 +376,34 @@ def test_a_staged_key_survives_a_failure_after_the_write(
     key = staged[0].payload["change_key"]
     assert isinstance(key, str)
     assert key.startswith("crd_")
+    assert key in str(raised.value)
     # And it is a change an approver can actually reach.
     assert any(change.change_key == key for change in erp.list_staged(approver))
+
+
+def test_a_downgraded_escalation_without_a_question_asks_nothing(
+    erp: Erp, disputes: Principal
+) -> None:
+    """`DC-0001` matches no criterion, so `escalate` is downgraded to a clarifying question.
+    The schema requires a question only of a real `ask_question`, so prose from `draft_reply`
+    was being recorded as the case's one question — and then suppressed the real one."""
+    downgraded = run_step_with(
+        erp,
+        disputes,
+        "DC-0001",
+        _provider(
+            _reply(
+                next_action="escalate",
+                tool_choice=None,
+                question=None,
+                draft_reply="I am escalating this case to a supervisor.",
+            )
+        ),
+    )
+    assert downgraded.question is None
+    assert downgraded.escalate is None
+    kinds = [event.kind for event in erp.list_case_events(disputes, "DC-0001", limit=20)]
+    assert "question" not in kinds
+    # The allowance is intact: a later step with a real question still asks it.
+    asked = run_step_with(erp, disputes, "DC-0001", _provider(_reply()))
+    assert asked.question == "What quantity was received against this invoice?"

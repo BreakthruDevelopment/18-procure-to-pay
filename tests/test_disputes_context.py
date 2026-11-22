@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pydantic import JsonValue
+
 from p2p.core.access import Principal
 from p2p.core.erp import Erp
 from p2p.disputes.context import (
@@ -105,3 +107,47 @@ def test_the_rolling_summary_is_what_the_model_is_sent(erp: Erp, disputes: Princ
     text = render_transcript(facts)
     assert "earlier: the supplier claims a short delivery" in text
     assert "Rolling summary:" in text
+
+
+def test_a_read_payload_keeps_the_decision_fields_and_digests_the_whole_body() -> None:
+    """Sorting the whole body put `lines` first, so the cap cut exactly the fields the written
+    criteria are about: a five-line invoice lost its `total`."""
+    body: dict[str, JsonValue] = {
+        "id": "INV-1013",
+        "po_ref": "PO-1005",
+        "state": "posted",
+        "supplier_id": "SUP-1003",
+        "total": 60000,
+        "lines": [
+            {"line_no": n, "description": "Brass gate valve, 1in " * 4, "qty": 200}
+            for n in range(1, 9)
+        ],
+    }
+    payload = read_result_payload("get_invoice", body)
+    text = payload["result"]
+    assert isinstance(text, str)
+    assert len(text) == READ_RESULT_CAP
+    for field in ("po_ref", "PO-1005", "state", "posted", "total", "60000", "supplier_id"):
+        assert field in text, field
+    # The digest is over the whole body, so two invoices the cap renders identically still
+    # count as different reads.
+    other: dict[str, JsonValue] = dict(body)
+    other["total"] = 70000
+    assert read_result_payload("get_invoice", other)["digest"] != payload["digest"]
+    assert read_result_payload("get_invoice", dict(body))["digest"] == payload["digest"]
+
+
+def test_passes_without_new_facts_counts_the_trailing_run(erp: Erp, disputes: Principal) -> None:
+    """A loop is consecutive: `[no, yes, no]` is not "looped twice without new facts"."""
+    for progress in (False, True, False):
+        erp.append_case_event(
+            disputes,
+            "DC-0001",
+            kind="step",
+            payload={"action": "read_invoice", "new_facts": progress},
+        )
+    assert load_facts(erp, disputes, "DC-0001").passes_without_new_facts == 1
+    erp.append_case_event(
+        disputes, "DC-0001", kind="step", payload={"action": "read_invoice", "new_facts": False}
+    )
+    assert load_facts(erp, disputes, "DC-0001").passes_without_new_facts == 2

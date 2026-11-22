@@ -158,14 +158,6 @@ async def take_step(
             change_key = gateway.staged.change_key
             change_description = gateway.staged.description
             new_facts = True
-            # Recorded here, not with the rest of the step's events: the row is already
-            # committed, and anything between this point and `_record` can raise
-            # `TransientFailure` (`load_facts` and `advance_case` are both database calls).
-            # That left a staged credit with its key printed nowhere, so a retry staged a
-            # second one. The key now reaches the case transcript as soon as it exists.
-            erp.append_case_event(
-                principal, case_id, kind="staged", payload={"change_key": change_key}
-            )
         else:
             # A read's result is recorded on the case, bounded, so the next step's model is
             # actually told what was read. It was discarded before, which also made the written
@@ -173,14 +165,23 @@ async def take_step(
             # counted as new facts every time, so "looped twice without new facts" never fired.
             tool_name = ACTION_TOOLS[step.next_action]
             read_result = read_result_payload(tool_name or "", gateway.body)
-            new_facts = (read_result["tool"], read_result["result"]) not in _reads_so_far(facts)
+            # Progress is decided on a digest of the WHOLE body, never on the text that the
+            # cap may have cut: two different invoices whose first 600 characters agree would
+            # otherwise read as no progress and could escalate `LOOPED` with a false reason.
+            new_facts = (read_result["tool"], read_result["digest"]) not in _reads_so_far(facts)
 
     if change_key is not None:
         # Everything from here is bookkeeping about a change that is already committed. A
         # transient lock in it must not reach the caller as "try again": the retry would stage
-        # a second, independently approvable credit. The key is already on the case transcript
-        # (recorded above), so the step is reported as partly done, not as retryable.
+        # a second, independently approvable credit. Recording the key is the FIRST thing in
+        # here and is inside the guard, because that append is itself an ERP write in its own
+        # transaction: with it outside, a lock on that one call raised a retryable failure with
+        # the key recorded nowhere at all — strictly worse than the case this guard was added
+        # for. `Erp._write`'s own docstring states the invariant this breaks.
         try:
+            erp.append_case_event(
+                principal, case_id, kind="staged", payload={"change_key": change_key}
+            )
             return await _finish(
                 erp,
                 principal,
@@ -279,7 +280,7 @@ async def _finish(
 def _reads_so_far(facts: CaseFacts) -> set[tuple[object, object]]:
     """Every read result already on the case, so a repeat of one is not new facts."""
     return {
-        (event.payload.get("tool"), event.payload.get("result"))
+        (event.payload.get("tool"), event.payload.get("digest"))
         for event in facts.history
         if event.kind == "read"
     }

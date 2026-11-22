@@ -8,6 +8,7 @@ fenced before it reaches a model.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 from collections.abc import Mapping
@@ -44,11 +45,21 @@ class CaseFacts:
 
     @property
     def passes_without_new_facts(self) -> int:
-        return sum(
-            1
-            for event in self.history
-            if event.kind == "step" and event.payload.get("new_facts") is False
-        )
+        """How many steps in a row, most recent first, made no progress.
+
+        Counting every such step ever made the criterion read "twice without new facts" as
+        "twice in the case's whole history": `[no, yes, no]` escalated a case that had just
+        made progress, with "the case has looped twice without new facts" recorded as the
+        reason. A loop is consecutive by definition.
+        """
+        count = 0
+        for event in reversed(self.history):
+            if event.kind != "step":
+                continue
+            if event.payload.get("new_facts") is not False:
+                break
+            count += 1
+        return count
 
     @property
     def question_asked(self) -> bool:
@@ -140,11 +151,27 @@ def read_result_payload(tool: str, body: Mapping[str, JsonValue]) -> dict[str, J
     Without this a read's result was discarded: the step event recorded only the action, so a
     model that read an invoice was never told the total or the PO it had just asked for, and the
     written loop criterion could never fire because every repeat read counted as new facts.
+
+    The scalar fields come first and the collections after, because the cap cuts the tail and
+    the written criteria are about the scalars. Sorting the whole body put `lines` first, so a
+    five-line invoice lost its `total` and a six-line one also lost `po_ref`, `state` and
+    `supplier_id` — the change failed its own purpose on exactly the invoices a disputes desk
+    argues about. `digest` is over the WHOLE body, so deciding whether a read was progress
+    never depends on what the cap removed.
     """
-    text = _payload_text(body)
+    scalars = {key: value for key, value in body.items() if not isinstance(value, list | dict)}
+    collections = {key: value for key, value in body.items() if isinstance(value, list | dict)}
+    text = _payload_text(scalars)
+    if collections and len(text) < READ_RESULT_CAP:
+        text = f"{text} {_payload_text(collections)}"
     if len(text) > READ_RESULT_CAP:
         text = text[: READ_RESULT_CAP - len(_RESULT_TRUNCATED)] + _RESULT_TRUNCATED
-    return {"tool": tool, "result": text}
+    return {"tool": tool, "result": text, "digest": _digest(body)}
+
+
+def _digest(body: Mapping[str, JsonValue]) -> str:
+    """A short fingerprint of a whole read result, for deciding whether a step made progress."""
+    return hashlib.sha256(_payload_text(body).encode()).hexdigest()[:16]
 
 
 def _event_line(event: CaseEvent) -> str:

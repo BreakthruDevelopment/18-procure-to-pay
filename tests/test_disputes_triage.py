@@ -407,3 +407,89 @@ def test_a_downgraded_escalation_without_a_question_asks_nothing(
     # The allowance is intact: a later step with a real question still asks it.
     asked = run_step_with(erp, disputes, "DC-0001", _provider(_reply()))
     assert asked.question == "What quantity was received against this invoice?"
+
+
+def test_a_failure_recording_the_staged_key_is_not_a_retry(
+    erp: Erp, disputes: Principal, approver: Principal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recording the key is itself an ERP write in its own transaction. With it outside the
+    guard, a lock on that one call raised a RETRYABLE failure with the key recorded nowhere —
+    worse than the case the guard was added for, because the retry stages a second credit."""
+    real = Erp.append_case_event
+
+    def flaky(
+        self: Erp, principal_arg: Principal, case_id: str, *, kind: str, payload: object
+    ) -> object:
+        if kind == "staged":
+            raise TransientFailure("the ERP was busy")
+        return real(self, principal_arg, case_id, kind=kind, payload=payload)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Erp, "append_case_event", flaky)
+    with pytest.raises(InternalFailure) as raised:
+        run_step_with(
+            erp,
+            disputes,
+            "DC-0001",
+            _provider(
+                _reply(
+                    next_action="propose_credit",
+                    tool_choice="issue_credit_memo",
+                    amount=1_000,
+                    currency="USD",
+                    reason="short delivery",
+                    draft_reply="Proposing a credit.",
+                )
+            ),
+        )
+    assert raised.value.is_retryable is False
+    monkeypatch.undo()
+    staged = [change.change_key for change in erp.list_staged(approver)]
+    assert len(staged) == 1
+    assert staged[0] in str(raised.value)
+
+
+def test_a_hold_step_cannot_escalate_on_an_amount_the_model_named(
+    erp: Erp, disputes: Principal
+) -> None:
+    """The second narrowing, after the write: a staged hold carrying a large `amount` must not
+    escalate as "the credit exceeds 2,500" either. `INV-1013` is posted, so the hold stages."""
+    outcome = run_step_with(
+        erp,
+        disputes,
+        "DC-0001",
+        _provider(
+            _reply(
+                next_action="hold_payment",
+                tool_choice="hold_payment",
+                reason="short delivery under investigation",
+                amount=400_000,
+                draft_reply="Holding payment while the case is open.",
+            )
+        ),
+    )
+    assert outcome.change_key is not None
+    assert outcome.change_key.startswith("hld_")
+    assert outcome.escalate is None
+    assert outcome.case.escalated_reason is None
+
+
+def test_a_refused_call_is_not_progress_and_is_not_a_pass(erp: Erp, disputes: Principal) -> None:
+    """A refusal is neither new facts nor a step toward the loop criterion."""
+    outcome = run_step_with(
+        erp,
+        disputes,
+        "DC-0001",
+        _provider(
+            _reply(
+                next_action="read_invoice",
+                tool_choice="get_invoice",
+                invoice_id="INV-2001",
+                draft_reply="Reading an invoice from another company code.",
+            )
+        ),
+    )
+    assert outcome.refused is not None
+    assert outcome.new_facts is False
+    assert outcome.escalate is None
+    kinds = [event.kind for event in erp.list_case_events(disputes, "DC-0001", limit=20)]
+    assert "read" not in kinds

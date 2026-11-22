@@ -60,6 +60,11 @@ later slice is most likely to break by accident:
   its `company_code` -- and, for a case read by a disputes agent, its `assigned_to` -- inside the
   SQL, so both take the same path and get the same message. Two different messages are an existence
   oracle for another company's ids.
+- **A row that names another row must be coherent with it.** An invoice-linked credit must be in
+  that invoice's currency and name its supplier; a case naming an invoice must name that invoice's
+  supplier; a hold filed under a case must be on an invoice of that case's supplier. Money counted
+  against the wrong row is the failure these prevent, and a staged change's one-line summary is
+  what an approver checks it by -- so a summary names every row the change touches.
 - **`find_invoices_by_number`** is how a document reaches its `invoice` row: an `InvoiceDraft`
   carries a number, never an id, and `p2p ingest` refuses a document with no seeded row rather than
   inserting one. It returns every state (including `posted` and `held`, so a re-ingest can report

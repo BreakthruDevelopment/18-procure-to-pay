@@ -27,7 +27,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -404,6 +404,9 @@ MAX_PAGE: Final = 100
 DEFAULT_PAGE: Final = 50
 #: The spec's context window for a case: the rolling summary plus the last 10 events.
 DEFAULT_CASE_EVENTS: Final = 10
+#: How long a write waits for another connection's lock before reporting the database busy. A
+#: parameter so a test can prove the `transient` mapping in milliseconds instead of five seconds.
+DEFAULT_BUSY_TIMEOUT_MS: Final = 5_000
 
 
 class Clock(Protocol):
@@ -578,6 +581,18 @@ _STAGED_SQL: Final[Mapping[ChangeKind, _StagedSql]] = {
 }
 
 
+def _credit_summary(amount: int, currency: str, supplier_id: str, invoice_id: str | None) -> str:
+    """What a person reads before approving a credit. It names the invoice when there is one.
+
+    Without it, a credit staged against an invoice looked identical to one staged against none, so
+    an approver had no way to see that the invoice and the supplier did not go together.
+    """
+    money = _money(amount, currency)
+    if invoice_id is None:
+        return f"credit {money} to supplier {supplier_id}"
+    return f"credit {money} to supplier {supplier_id} against invoice {invoice_id}"
+
+
 def _money(amount: int, currency: str) -> str:
     """Minor units as a readable amount, for a staged change's one-line summary."""
     sign = "-" if amount < 0 else ""
@@ -611,7 +626,13 @@ class Erp:
     # -- lifecycle ------------------------------------------------------------------------------
 
     @classmethod
-    def open(cls, path: str | Path, *, clock: Clock = _utc_now) -> Erp:
+    def open(
+        cls,
+        path: str | Path,
+        *,
+        clock: Clock = _utc_now,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    ) -> Erp:
         target = Path(path)
         if target.parent and not target.parent.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -624,14 +645,20 @@ class Erp:
         # Connection-scoped, so it cannot live in schema.sql: without it the schema's REFERENCES
         # clauses are documentation rather than constraints.
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
+        # A literal, not a parameter: PRAGMA takes none. Coerced to a non-negative int first, so
+        # the interpolated value is a number and nothing else.
+        timeout = max(int(busy_timeout_ms), 0)
+        connection.execute(f"PRAGMA busy_timeout = {timeout:d}")
         erp = cls(connection, clock=clock)
         erp._initialize()
         return erp
 
-    def _initialize(self) -> None:
+    def _applied_version(self) -> int:
         row = self._conn.execute("PRAGMA user_version").fetchone()
-        version = _number(row, "user_version") if row is not None else 0
+        return _number(row, "user_version") if row is not None else 0
+
+    def _initialize(self) -> None:
+        version = self._applied_version()
         if version == SCHEMA_VERSION:
             return
         if version != 0:
@@ -656,6 +683,19 @@ class Erp:
         )
         try:
             self._conn.executescript(script)
+        except sqlite3.OperationalError:
+            # Two callers can both read `user_version == 0` above -- the read takes no write lock,
+            # and there is no database yet to take one on. They then both run this script, and the
+            # loser is told `table supplier already exists`. It has nothing to roll back: the
+            # winner's BEGIN/COMMIT are inside the script, so the loser's own transaction never
+            # opened. The honest answer for the loser is that the database is now built, which is
+            # what it wanted; anything else is a raw driver exception out of the one code path that
+            # creates the file, in a module no later slice may edit.
+            if self._conn.in_transaction:
+                self._conn.execute("ROLLBACK")
+            if self._applied_version() == SCHEMA_VERSION:
+                return
+            raise
         except BaseException:
             if self._conn.in_transaction:
                 self._conn.execute("ROLLBACK")
@@ -683,15 +723,35 @@ class Erp:
 
         `COMMIT` is inside the `try`: a commit that fails leaves a transaction open, and the caller
         would be handed the failure with the lock still held.
+
+        A contended database is turned into `TransientFailure` here rather than escaping as a driver
+        exception. `AGENTS.md` says the category is decided by the class raised, never at the call
+        site, and the CLI path has no adapter to catch one for it -- slice 18.7 must be able to turn
+        one locked document into a `failed` row with an `error_category`, not a traceback. Only a
+        genuine lock is mapped: `sqlite3.OperationalError` also covers "no such column", which is a
+        bug and must not be reported as worth retrying.
         """
-        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as busy:
+            raise _busy_or(busy) from busy
         try:
             yield self._conn
             self._conn.execute("COMMIT")
+        except sqlite3.OperationalError as busy:
+            self._rollback()
+            raise _busy_or(busy) from busy
         except BaseException:
-            if self._conn.in_transaction:
-                self._conn.execute("ROLLBACK")
+            self._rollback()
             raise
+
+    def _rollback(self) -> None:
+        if not self._conn.in_transaction:
+            return
+        # Suppressed: a cleanup that fails must never replace the failure being handled, which is
+        # the one the caller needs to see.
+        with suppress(sqlite3.OperationalError):
+            self._conn.execute("ROLLBACK")
 
     def _now(self) -> str:
         return _stamp(self._clock())
@@ -1271,6 +1331,15 @@ class Erp:
                     raise ValidationFailed(
                         "a credit against an invoice must be in that invoice's currency"
                     )
+                if _text(invoice, "supplier_id") != supplier_id:
+                    # The same defect as the currency one, one column over: the credit would be
+                    # counted against this invoice by `get_payment_status` while being owed to
+                    # somebody else. And the human check could not catch it -- a staged credit's
+                    # one-line summary named the supplier and not the invoice, so `p2p review` would
+                    # show something perfectly coherent. The summary now names both.
+                    raise ValidationFailed(
+                        "a credit against an invoice must name that invoice's supplier"
+                    )
             key, seq = self._next_key(conn, ChangeKind.CREDIT_MEMO)
             conn.execute(
                 sql.insert,
@@ -1313,6 +1382,15 @@ class Erp:
             if case_id is not None:
                 case_row = self._case_row(principal, case_id)
                 assert_can(principal, Action.STAGE_PAYMENT_HOLD, _owner(case_row))
+                if _text(case_row, "supplier_id") != _text(row, "supplier_id"):
+                    # The same coherence rule as the credit's. A hold filed under a case about a
+                    # different supplier reads, to 18.6's triage and to an approver, as evidence
+                    # for a dispute that has nothing to do with this invoice. The predicate is on
+                    # the supplier because `dispute_case.invoice_id` is nullable -- a case is about
+                    # a supplier, and only sometimes about one invoice.
+                    raise ValidationFailed(
+                        "a hold filed under a case must be on an invoice of that case's supplier"
+                    )
             key, seq = self._next_key(conn, ChangeKind.PAYMENT_HOLD)
             conn.execute(
                 sql.insert,
@@ -1340,6 +1418,10 @@ class Erp:
             if invoice_id is not None:
                 invoice = self._invoice_row(principal, invoice_id)
                 assert_can(principal, Action.OPEN_CASE, _owner(invoice))
+                if _text(invoice, "supplier_id") != supplier_id:
+                    raise ValidationFailed(
+                        "a case about an invoice must name that invoice's supplier"
+                    )
             row = conn.execute("SELECT COUNT(*) AS n FROM dispute_case").fetchone()
             case_id = f"DC-{_number(row, 'n') + 1:04d}"
             conn.execute(
@@ -1386,6 +1468,10 @@ class Erp:
             current = CaseState(_text(row, "state"))
             if _CASE_ORDER.index(to_state) < _CASE_ORDER.index(current):
                 raise ValidationFailed(f"a case does not move back from {current} to {to_state}")
+            if current is to_state:
+                # A no-op, and it writes nothing: re-escalating an escalated case used to overwrite
+                # the criterion already recorded, losing the reason the case was escalated for.
+                return _case(row)
             if why is None:
                 changed = conn.execute(
                     "UPDATE dispute_case SET state = ? WHERE id = ? AND state = ?",
@@ -1397,8 +1483,7 @@ class Erp:
                     " WHERE id = ? AND state = ?",
                     (to_state, why, case_id, current),
                 )
-            if current is not to_state:
-                _one_row_changed(changed, "the case changed state while this step was being made")
+            _one_row_changed(changed, "the case changed state while this step was being made")
         return self.get_case(principal, case_id)
 
     def set_case_summary(self, principal: Principal, case_id: str, summary: str) -> DisputeCase:
@@ -1634,12 +1719,7 @@ class Erp:
         )
 
     def _change_row(self, principal: Principal, change_key: str) -> sqlite3.Row:
-        kind = _kind_of(change_key)
-        return self._one(
-            _STAGED_SQL[kind].by_key,
-            (change_key, principal.company_code),
-            "staged change",
-        )
+        return self._resolve_change(principal, change_key)[1]
 
     def _next_key(self, conn: sqlite3.Connection, kind: ChangeKind) -> tuple[str, int]:
         row = conn.execute(_STAGED_SQL[kind].next_seq).fetchone()
@@ -1684,7 +1764,9 @@ class Erp:
                 company_code=company_code,
                 staged_by=staged_by,
                 staged_at=staged_at,
-                summary=f"credit {_money(amount, currency)} to supplier {supplier_id}",
+                summary=_credit_summary(
+                    amount, currency, supplier_id, _opt_text(row, "invoice_id")
+                ),
                 decided_by=decided_by,
                 decision=decision,
                 applied_at=applied_at,
@@ -1743,6 +1825,19 @@ def _kind_of(change_key: str) -> ChangeKind:
     return _KIND_BY_PREFIX[change_key[:4]]
 
 
+def _busy_or(failure: sqlite3.OperationalError) -> BaseException:
+    """`TransientFailure` for a real lock; the driver's own error for anything else.
+
+    `sqlite3.OperationalError` means both "another connection holds the write lock", which is worth
+    retrying, and "no such column", which is a bug. Told apart by `sqlite_errorname` rather than by
+    reading the message, so the test for one is not a test of English.
+    """
+    name = failure.sqlite_errorname
+    if name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+        return TransientFailure("the ERP was busy; this write can be tried again")
+    return failure
+
+
 def _one_row_changed(cursor: sqlite3.Cursor, complaint: str) -> None:
     """Refuse unless an UPDATE changed exactly the one row it named.
 
@@ -1775,6 +1870,7 @@ def _str_field(raw: Mapping[str, object], key: str) -> str:
 
 
 __all__: Sequence[str] = (
+    "DEFAULT_BUSY_TIMEOUT_MS",
     "DEFAULT_CASE_EVENTS",
     "KEY_PREFIX",
     "MAX_PAGE",

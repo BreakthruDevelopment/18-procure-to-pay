@@ -7,6 +7,7 @@ mechanism they will be declared with, exercised through operations defined in th
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from collections.abc import Iterator, Mapping
 
@@ -350,9 +351,9 @@ def _explodes(erp: Erp, principal: Principal, args: InvoiceArgs) -> OperationOut
     raise RuntimeError("a bug, carrying 1001-A and company 1000 in its message")
 
 
-def _locked(erp: Erp, principal: Principal, args: InvoiceArgs) -> OperationOutcome:
+def _broken_sql(erp: Erp, principal: Principal, args: InvoiceArgs) -> OperationOutcome:
     del erp, principal, args
-    raise sqlite3.OperationalError("database is locked")
+    raise sqlite3.OperationalError("no such column: nonexistent_column")
 
 
 EXPLODES = ErpOperation(
@@ -363,13 +364,13 @@ EXPLODES = ErpOperation(
     action=Action.READ_INVOICE,
     run=_explodes,
 )
-LOCKED = ErpOperation(
-    name="locked",
-    description="A read that finds the database busy.",
+BROKEN_SQL = ErpOperation(
+    name="broken_sql",
+    description="A read with a mistake in its SQL.",
     effect=Effect.READ,
     input_model=InvoiceArgs,
     action=Action.READ_INVOICE,
-    run=_locked,
+    run=_broken_sql,
 )
 
 
@@ -386,10 +387,33 @@ def test_an_unexpected_exception_becomes_an_internal_result_and_leaks_nothing(
         assert leak not in result.content, leak
 
 
-def test_a_busy_database_becomes_a_retryable_transient_result(
+def test_a_driver_error_is_internal_rather_than_transient(
     erp: Erp, clerk: Principal, ctx: ToolContext
 ) -> None:
-    result = _call(LOCKED.bind(erp, clerk), {"invoice_id": BATCH_INVOICE}, ctx)
-    assert result.error_category is ErrorCategory.TRANSIENT
-    assert result.is_retryable is True
-    assert "locked" not in result.content
+    """A contended database is already `TransientFailure` from `erp.py`, which is where the category
+    is decided. So a `sqlite3.Error` that reaches the adapter is one nobody classified -- "no such
+    column", a bug -- and reporting it as worth retrying would have a model try it for ever.
+    """
+    result = _call(BROKEN_SQL.bind(erp, clerk), {"invoice_id": BATCH_INVOICE}, ctx)
+    assert result.error_category is ErrorCategory.INTERNAL
+    assert result.is_retryable is False
+    assert "nonexistent_column" not in result.content
+
+
+def test_the_internal_log_line_carries_no_unreviewed_text(
+    erp: Erp, clerk: Principal, ctx: ToolContext, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`AGENTS.md`: the logger never carries document text, and an exception message is exactly
+    that -- pydantic and sqlite3 both quote the value or the statement that caused the failure."""
+    with caplog.at_level(logging.ERROR, logger="p2p.core.adapter"):
+        _call(EXPLODES.bind(erp, clerk), {"invoice_id": BATCH_INVOICE}, ctx)
+    (record,) = [entry for entry in caplog.records if entry.name == "p2p.core.adapter"]
+    assert record.getMessage() == "tool failed internally"
+    assert record.exc_info is None
+    # `extra=` fields land in the record's `__dict__`, which its type stub does not declare.
+    fields = record.__dict__
+    assert fields["failure"] == "RuntimeError"
+    assert fields["tool"] == "explodes"
+    assert str(fields["where"]).startswith("test_adapter.py:")
+    for leak in ("1001-A", "company 1000", "a bug"):
+        assert leak not in caplog.text, leak

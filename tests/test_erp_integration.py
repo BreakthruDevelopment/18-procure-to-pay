@@ -151,6 +151,61 @@ def test_a_credit_against_an_invoice_must_be_in_that_invoices_currency(
     assert (status.currency, status.applied_credit_total) == ("USD", 10_000)
 
 
+def test_a_credit_against_an_invoice_must_name_that_invoices_supplier(
+    erp: Erp, disputes: Principal
+) -> None:
+    """The currency defect, one column over: the credit would be counted against this invoice while
+    being owed to somebody else."""
+    with pytest.raises(ValidationFailed, match="invoice's supplier"):
+        erp.stage_credit_memo(
+            disputes,
+            supplier_id="SUP-1001",
+            invoice_id=DISPUTED_INVOICE,  # belongs to SUP-1003
+            amount=10_000,
+            currency="USD",
+            reason="goodwill",
+        )
+
+
+def test_a_staged_credits_summary_names_the_invoice_when_it_has_one(
+    erp: Erp, disputes: Principal, approver: Principal
+) -> None:
+    """What `p2p review` shows. Without the invoice, a mismatched credit looked quite coherent."""
+    against_invoice = erp.stage_credit_memo(
+        disputes,
+        supplier_id="SUP-1003",
+        invoice_id=DISPUTED_INVOICE,
+        amount=250_000,
+        currency="USD",
+        reason="short delivery",
+    )
+    assert against_invoice.summary == (
+        f"credit 2,500.00 USD to supplier SUP-1003 against invoice {DISPUTED_INVOICE}"
+    )
+    standalone = erp.stage_credit_memo(
+        disputes, supplier_id="SUP-1003", amount=500, currency="USD", reason="rebate"
+    )
+    assert standalone.summary == "credit 5.00 USD to supplier SUP-1003"
+    # And an approver sees the same line it will decide from.
+    shown = {change.change_key: change.summary for change in erp.list_staged(approver)}
+    assert shown[against_invoice.change_key] == against_invoice.summary
+
+
+def test_re_escalating_a_case_does_not_overwrite_the_criterion_already_recorded(
+    erp: Erp, disputes: Principal
+) -> None:
+    case = erp.open_case(disputes, supplier_id="SUP-1003")
+    erp.advance_case(
+        disputes, case.id, CaseState.ESCALATED, escalated_reason="the invoice has no PO"
+    )
+    again = erp.advance_case(
+        disputes, case.id, CaseState.ESCALATED, escalated_reason="something else entirely"
+    )
+    # A same-state move is a no-op and writes nothing, so the reason the case was escalated for
+    # survives a second pass of 18.6's state machine over the same step.
+    assert again.escalated_reason == "the invoice has no PO"
+
+
 def test_a_credit_not_naming_an_invoice_may_be_in_any_currency(
     erp: Erp, disputes: Principal
 ) -> None:
@@ -863,6 +918,34 @@ def test_a_case_runs_forward_and_never_back(erp: Erp, disputes: Principal) -> No
         erp.advance_case(disputes, case.id, CaseState.OPEN)
     with pytest.raises(ValidationFailed, match="criterion"):
         erp.advance_case(disputes, "DC-0001", CaseState.ESCALATED)
+
+
+def test_a_case_and_a_hold_must_be_coherent_with_the_invoice_they_name(
+    erp: Erp, disputes: Principal
+) -> None:
+    """The same rule as the credit's, applied to the other two places money and cases meet.
+
+    Neither sums money, so neither is the defect the credit was -- but 18.6's triage reads these
+    columns together, and a hold filed under a case about a different supplier reads as evidence
+    for a dispute that has nothing to do with the invoice.
+    """
+    with pytest.raises(ValidationFailed, match="invoice's supplier"):
+        erp.open_case(disputes, supplier_id="SUP-1001", invoice_id=DISPUTED_INVOICE)
+    # DC-0001 is about SUP-1003; INV-1001 is SUP-1001's.
+    with pytest.raises(ValidationFailed, match="that case's supplier"):
+        erp.stage_payment_hold(
+            disputes, invoice_id=BATCH_INVOICE, reason="disputed", case_id=MY_CASE
+        )
+    # The coherent versions of both are accepted.
+    assert erp.open_case(disputes, supplier_id="SUP-1003", invoice_id=DISPUTED_INVOICE).state is (
+        CaseState.OPEN
+    )
+    assert (
+        erp.stage_payment_hold(
+            disputes, invoice_id=DISPUTED_INVOICE, reason="disputed", case_id=MY_CASE
+        ).case_id
+        == MY_CASE
+    )
 
 
 def test_a_case_keeps_a_rolling_summary_and_the_last_ten_events(

@@ -493,3 +493,41 @@ def test_a_refused_call_is_not_progress_and_is_not_a_pass(erp: Erp, disputes: Pr
     assert outcome.escalate is None
     kinds = [event.kind for event in erp.list_case_events(disputes, "DC-0001", limit=20)]
     assert "read" not in kinds
+
+
+def test_the_rolling_summary_carries_the_facts_not_the_action_names(
+    erp: Erp, disputes: Principal
+) -> None:
+    """The summary recorded "read_invoice: read_invoice", so once a step's event aged out of
+    the ten-event window its substance was gone from both halves of the model's context."""
+    run_step_with(erp, disputes, "DC-0001", _provider(_read_invoice()))
+    after_read = erp.get_case(disputes, "DC-0001").summary
+    assert after_read is not None
+    # The claim the case was opened with is seeded, because its event ages out.
+    assert "short delivery" in after_read
+    assert "PO-1005" in after_read  # what the read actually returned
+    assert "read_invoice: read_invoice" not in after_read
+
+    run_step_with(erp, disputes, "DC-0001", _provider(_reply()))
+    after_question = erp.get_case(disputes, "DC-0001").summary
+    assert after_question is not None
+    assert "What quantity was received against this invoice?" in after_question
+
+    run_step_with(
+        erp,
+        disputes,
+        "DC-0001",
+        _provider(
+            _reply(
+                next_action="propose_credit",
+                tool_choice="issue_credit_memo",
+                amount=1_000,
+                currency="USD",
+                reason="short delivery",
+                draft_reply="Proposing a credit.",
+            )
+        ),
+    )
+    after_credit = erp.get_case(disputes, "DC-0001").summary
+    assert after_credit is not None
+    assert "crd_000001" in after_credit

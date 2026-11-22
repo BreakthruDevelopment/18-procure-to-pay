@@ -29,6 +29,7 @@ EVENT_WINDOW = 10
 READ_RESULT_CAP = 600
 _TRUNCATED = "\n[transcript truncated]"
 _RESULT_TRUNCATED = "…[cut]"
+_OLDER_OMITTED = "[older events omitted]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,23 +96,50 @@ def load_facts(erp: Erp, principal: Principal, case_id: str) -> CaseFacts:
 
 
 def render_transcript(facts: CaseFacts) -> str:
-    """The rolling summary plus the last 10 events, cut to the task's 12,000 character cap."""
-    parts: list[str] = []
+    """The rolling summary plus the last 10 events, inside the task's 12,000 character cap.
+
+    The budget goes to the NEWEST events first. Cutting a prefix of the joined text spent it
+    on the oldest instead: nine long notes followed by a supplier's correction left the
+    correction out of the model's request altogether, so the desk could go on proposing a
+    credit the supplier had just withdrawn. Whole events are dropped from the old end, and the
+    drop is stated rather than silent.
+    """
+    head: list[str] = []
     summary = facts.case.summary
     if summary:
-        parts.append("Rolling summary:")
-        parts.append(summary)
-    parts.append("Last events:")
+        head.append("Rolling summary:")
+        head.append(summary)
+    head.append("Last events:")
+    header = "\n".join(head)
     if not facts.window:
-        parts.append("(none)")
-    for event in facts.window:
-        parts.append(_event_line(event))
-    text = "\n".join(parts)
-    if len(text) <= TRANSCRIPT_CAP:
+        return _within_cap(f"{header}\n(none)")
+    # The omission marker's room is reserved up front, so adding it can never push the result
+    # back over the cap and cost the newest event the budget was just spent on.
+    room = TRANSCRIPT_CAP - len(header) - len(_OLDER_OMITTED) - 1
+    kept: list[str] = []
+    dropped = False
+    for event in reversed(facts.window):
+        line = _event_line(event)
+        if len(line) + 1 > room:
+            dropped = True
+            if not kept:
+                # Not even the newest event fits beside the summary. Keep what of it does.
+                kept.append(_within_cap(line, room))
+            break
+        kept.append(line)
+        room -= len(line) + 1
+    if dropped:
+        kept.append(_OLDER_OMITTED)
+    kept.reverse()
+    return _within_cap("\n".join([header, *kept]))
+
+
+def _within_cap(text: str, cap: int = TRANSCRIPT_CAP) -> str:
+    """Cut `text` to `cap`, saying so. Measured from the marker, not written out: a
+    `cap - 22` slice plus a 23-character marker returned 12,001, one over the cap."""
+    if len(text) <= cap:
         return text
-    # Measured from the marker, not written out: `TRANSCRIPT_CAP - 22` plus a 23-character
-    # marker returned 12,001, one over the cap this function exists to hold.
-    return text[: TRANSCRIPT_CAP - len(_TRUNCATED)] + _TRUNCATED
+    return text[: cap - len(_TRUNCATED)] + _TRUNCATED
 
 
 def fence_transcript(text: str, nonce: str | None = None) -> tuple[str, str]:
@@ -123,6 +151,16 @@ def fence_transcript(text: str, nonce: str | None = None) -> tuple[str, str]:
         body = body.replace(token, "")
     fenced = f"<case_transcript fence={token}>\n{body}\n</case_transcript fence={token}>"
     return fenced, token
+
+
+def opening_note(facts: CaseFacts) -> str | None:
+    """The claim the case was opened with, so it survives its event ageing out of the window."""
+    for event in facts.history:
+        if event.kind == "opened":
+            note = event.payload.get("note")
+            if isinstance(note, str) and note:
+                return f"opened: {note}"
+    return None
 
 
 def roll_summary(previous: str | None, kind: str, detail: str) -> str:
@@ -193,6 +231,7 @@ __all__ = [
     "CaseFacts",
     "fence_transcript",
     "load_facts",
+    "opening_note",
     "read_result_payload",
     "render_transcript",
     "roll_summary",

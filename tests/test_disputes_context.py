@@ -74,16 +74,31 @@ def test_a_rolling_summary_is_replaced_not_appended_past_the_cap() -> None:
     assert len(huge) == SUMMARY_CAP
 
 
-def test_a_transcript_over_the_cap_is_truncated_to_the_cap(erp: Erp, disputes: Principal) -> None:
-    """The cap was asserted as a constant only; removing the truncation entirely survived. And
-    `text[:CAP - 22]` plus a 23-character marker returned 12,001 — one over the cap."""
-    for _ in range(EVENT_WINDOW + 2):
+def test_a_transcript_over_the_cap_keeps_the_newest_events(erp: Erp, disputes: Principal) -> None:
+    """The budget goes to the newest events. Cutting a prefix of the joined text spent it on
+    the oldest, so nine long notes followed by a supplier's correction left the correction out
+    of the model's request entirely — and the cap itself was asserted as a constant only, so
+    removing the truncation, or being one character over it, went unnoticed."""
+    for _ in range(EVENT_WINDOW):
         erp.append_case_event(disputes, "DC-0001", kind="note", payload={"n": "x" * 3000})
+    erp.append_case_event(
+        disputes, "DC-0001", kind="note", payload={"correction": "the supplier withdrew it"}
+    )
     erp.set_case_summary(disputes, "DC-0001", "s" * 3000)
     facts = load_facts(erp, disputes, "DC-0001")
     text = render_transcript(facts)
-    assert len(text) > TRANSCRIPT_CAP - 200  # the fixture really is over the cap
-    assert len(text) == TRANSCRIPT_CAP
+    assert len(text) <= TRANSCRIPT_CAP
+    assert len(text) > TRANSCRIPT_CAP - 3200  # the budget really is spent
+    assert "the supplier withdrew it" in text  # the NEWEST event survives
+    assert "[older events omitted]" in text  # and the drop is stated, not silent
+    assert "s" * 3000 in text  # the rolling summary is kept
+
+
+def test_one_event_too_large_for_the_cap_is_cut_and_says_so(erp: Erp, disputes: Principal) -> None:
+    erp.append_case_event(disputes, "DC-0001", kind="note", payload={"n": "y" * 20_000})
+    facts = load_facts(erp, disputes, "DC-0001")
+    text = render_transcript(facts)
+    assert len(text) <= TRANSCRIPT_CAP
     assert text.endswith("[transcript truncated]")
 
 

@@ -31,6 +31,7 @@ from p2p.disputes.context import (
     CaseFacts,
     fence_transcript,
     load_facts,
+    opening_note,
     read_result_payload,
     render_transcript,
     roll_summary,
@@ -260,8 +261,13 @@ async def _finish(
         question=question,
         criterion=why,
         refused=refused,
+        change_key=change_key,
+        change_description=change_description,
         read_result=read_result,
-        previous_summary=case.summary,
+        # Seeded with the claim the case was opened with when there is no summary yet: its
+        # `opened` event ages out of the ten-event window, and the summary is the only place
+        # left that can still carry it.
+        previous_summary=case.summary or opening_note(facts),
     )
     case = erp.get_case(principal, case_id)
     return StepOutcome(
@@ -275,6 +281,37 @@ async def _finish(
         refused=refused,
         new_facts=new_facts,
     )
+
+
+def _summary_detail(
+    action: NextAction,
+    *,
+    question: str | None,
+    criterion: str | None,
+    refused: str | None,
+    change_key: str | None,
+    change_description: str | None,
+    read_result: Mapping[str, JsonValue] | None,
+) -> str:
+    """What this step learned or did, for the rolling summary.
+
+    The summary recorded the action's name and nothing else — "read_invoice: read_invoice" —
+    so once a step's event aged out of the ten-event window its substance was gone from both
+    halves of the model's context: the desk could read an invoice, ask a question, read three
+    more things, and then no longer know what any of it said.
+    """
+    if criterion is not None:
+        return f"escalated: {criterion}"
+    if refused is not None:
+        return f"refused: {refused}"
+    if change_key is not None:
+        described = change_description or ""
+        return f"staged {change_key} {described}".strip()
+    if question is not None:
+        return f"asked: {question}"
+    if read_result is not None:
+        return f"read {read_result.get('tool')}: {read_result.get('result')}"
+    return action.value
 
 
 def _reads_so_far(facts: CaseFacts) -> set[tuple[object, object]]:
@@ -421,6 +458,8 @@ def _record(
     question: str | None,
     criterion: str | None,
     refused: str | None,
+    change_key: str | None,
+    change_description: str | None,
     read_result: Mapping[str, JsonValue] | None,
     previous_summary: str | None,
 ) -> None:
@@ -442,5 +481,13 @@ def _record(
         kind="step",
         payload={"action": action.value, "new_facts": new_facts},
     )
-    detail = criterion or refused or action.value
+    detail = _summary_detail(
+        action,
+        question=question,
+        criterion=criterion,
+        refused=refused,
+        change_key=change_key,
+        change_description=change_description,
+        read_result=read_result,
+    )
     erp.set_case_summary(principal, case_id, roll_summary(previous_summary, action.value, detail))

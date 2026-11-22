@@ -8,6 +8,10 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 WORKDIR /src
 COPY pyproject.toml uv.lock README.md ./
 COPY p2p ./p2p
+# The ERP schema and seed are force-included into the wheel from here (see pyproject.toml); without
+# this COPY the build stage cannot find them and the image ships a package that cannot open a
+# database. The `Container image` job is NOT a required check, so this is verified by hand.
+COPY erp ./erp
 RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.12-slim AS runner

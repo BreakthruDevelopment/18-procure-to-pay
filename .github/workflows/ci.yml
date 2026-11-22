@@ -50,7 +50,27 @@ jobs:
           uv export --quiet --frozen --no-dev --no-emit-project --no-hashes -o /tmp/runtime-reqs.txt
           uv pip install --python /tmp/wheel-check/bin/python -r /tmp/runtime-reqs.txt
           uv pip install --python /tmp/wheel-check/bin/python --no-deps dist/*.whl
-          /tmp/wheel-check/bin/python -c "import p2p, p2p.core, agent_container"
+          # `-P`, and run from somewhere else: without both, the repo checkout is on sys.path and
+          # this "proves" the wheel by importing the source tree beside it. It would pass with the
+          # ERP schema left out of the wheel entirely.
+          cd /tmp
+          /tmp/wheel-check/bin/python -P -c "import p2p, p2p.core, agent_container"
+      - name: The installed wheel can build an ERP database
+        # Not a formality: `erp/` is not a Python package, so the schema and the seed reach the
+        # wheel only through the force-include in pyproject.toml. An import check cannot see that,
+        # and the break would show up first at deploy.
+        run: |
+          cd /tmp
+          /tmp/wheel-check/bin/python -P -c "
+          import pathlib, tempfile
+          from p2p.core.access import Principal, Role
+          from p2p.core.erp import Erp
+          with tempfile.TemporaryDirectory() as home:
+              with Erp.open(pathlib.Path(home) / 'erp.sqlite3') as erp:
+                  clerk = Principal('clerk@demo', Role.CLERK, '1000')
+                  assert len(erp.list_open_invoices(clerk)) == 12
+          print('the packaged schema and seed build a database')
+          "
       - name: Smoke test (installed CLI)
         run: |
           /tmp/wheel-check/bin/p2p --version | tee smoke.out

@@ -37,6 +37,36 @@ The BreakthruDevelopment org holds other, unrelated applications.
   `Lint, test, build, smoke`, and the `review-gate.yml` caller, which must keep the `pull_request`,
   `pull_request_review` and `issue_comment` triggers and `permissions: actions: write`.
 
+## The simulated ERP (slice 18.2 owns all of this)
+
+Read `p2p/core/erp.py`'s module docstring before touching anything that stores state. The rules a
+later slice is most likely to break by accident:
+
+- **`p2p/core/erp.py` is the only module that opens the database.** Every accessor takes the acting
+  `Principal` and calls `assert_can`, and the `company_code` filter is inside the query. Never
+  filter, check or open a connection in a caller.
+- **Money is INTEGER minor units.** `125000` with currency `USD` is 1,250.00. The only REAL column
+  in the schema is `extraction.confidence`, which is a probability.
+- **`erp/schema.sql` and `erp/seed.sql`** are applied once, in one transaction, the first time a
+  path is opened; `PRAGMA user_version` records it. Nothing re-seeds, truncates or deletes a
+  database. `p2p demo` and `scripts/smoke.sh` build their own file in a fresh `mkdtemp()` directory
+  and **ignore the configured path**. Both files are force-included into the wheel at `p2p/_sql/`
+  (see `pyproject.toml`), so a new SQL file needs an entry there and a `COPY` in the `Dockerfile`.
+- **The invoice transition table is in `erp.py` and nowhere else.** `advance_invoice` takes the two
+  moves a clerk's own work causes; `matched -> staged` happens inside `stage_posting`, and the three
+  an approver causes inside `apply_change`. `held` is terminal: no slice may add a way out of it.
+- **`apply_change(principal, key, decision)` is the only path that applies or rejects a staged
+  change**, for all three kinds. The key's prefix (`pst_`, `crd_`, `hld_`) picks the table. Do not
+  write a second apply path, and do not add a `WHERE decision IS NULL` guard in a caller: apply-once
+  is a BEFORE UPDATE trigger in the schema, and a second decision surfaces as a stated no-op.
+- **A staged write returns both** app 17's `StagedChange` and the row's `change_key`. Carry the key
+  across every boundary -- MCP result, command output, batch summary: it is the only handle an
+  approver has on the change.
+- **Failures are the classes in `p2p/core/errors.py`**, each carrying its app-17 `error_category`
+  and `is_retryable`. Pick the class; never pick a category at the call site. Build messages from
+  fixed strings and schema-derived names only -- an id, a company code or a document's text in a
+  message is that value copied somewhere another principal, a log or a model may read it.
+
 ## The track's rules
 
 - **Every model call goes through app 17's `ModelProvider`.** No code here calls Bedrock directly.

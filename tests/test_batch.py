@@ -530,3 +530,56 @@ def test_cli_refuses_a_folder_over_the_limit(
         assert row[0] == 0
     finally:
         connection.close()
+
+
+def test_a_cut_coinciding_with_the_last_document_still_summarises(
+    erp: Erp, clerk: Principal, tmp_path: Path
+) -> None:
+    """Every document was attempted, so the budget stopped nothing and `stopped_early` is unset.
+
+    A non-transient failure of the *last* document, with the budget exhausted by the time
+    the run re-checked it, used to carry the budget's reason with no `not_reached` document
+    behind it. `BatchSummary` refuses that summary — rightly — so the run raised a pydantic
+    error instead of printing a summary and recording its `batch_run` row.
+    """
+    folder = tmp_path / "one"
+    folder.mkdir()
+    (folder / "01-unknown.txt").write_text("invoice for nobody", encoding="utf-8")
+    invoice = erp.get_invoice(clerk, "INV-1001")
+    unknown = _draft(invoice, erp.get_supplier(clerk, invoice.supplier_id).name)
+    unknown["number"] = "NO-SUCH"
+    budget = Budget(max_turns=1, max_tokens=100_000, max_seconds=60)
+
+    summary = run_batch(erp, clerk, folder, ReplayProvider([_extract(unknown)]), budget=budget)
+
+    assert (summary.items, summary.ok, summary.failed, summary.skipped) == (1, 0, 1, 0)
+    assert summary.stopped_early is None
+    assert summary.documents[0].outcome is ItemOutcome.FAILED
+    assert summary.documents[0].error_category is ErrorCategory.VALIDATION
+    recorded = erp.get_batch_run(clerk, "BR-000001")
+    assert (recorded.items, recorded.ok, recorded.failed, recorded.skipped) == (1, 0, 1, 0)
+    assert "stopped_early" not in recorded.summary
+
+
+def test_a_transient_cut_on_the_last_document_is_not_an_early_stop(
+    erp: Erp, clerk: Principal, tmp_path: Path
+) -> None:
+    """A document attempted and cut is still a document attempted: no run ended early."""
+    folder = tmp_path / "last"
+    folder.mkdir()
+    (folder / "01-1001-A.txt").write_text("invoice 1001-A", encoding="utf-8")
+    invoice = erp.get_invoice(clerk, "INV-1001")
+    bad = _draft(invoice, erp.get_supplier(clerk, invoice.supplier_id).name)
+    bad["total"] = 1
+    budget = Budget(max_turns=1, max_tokens=100_000, max_seconds=60)
+
+    summary = run_batch(
+        erp, clerk, folder, ReplayProvider([_extract(bad), _extract(bad)]), budget=budget
+    )
+
+    assert summary.documents[0].outcome is ItemOutcome.FAILED
+    assert summary.documents[0].error_category is ErrorCategory.TRANSIENT
+    assert summary.stopped_early is None
+    assert (summary.items, summary.ok, summary.failed, summary.skipped) == (1, 0, 1, 0)
+    assert erp.get_batch_run(clerk, "BR-000001").items == 1
+    assert erp.get_invoice(clerk, "INV-1001").state is InvoiceState.RECEIVED

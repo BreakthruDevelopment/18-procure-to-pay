@@ -158,8 +158,14 @@ async def _run_batch(
         )
         items.append(item)
         if cut is not None:
-            stopped = cut
-            items.extend(_not_reached(later) for later in documents[index + 1 :])
+            # The budget stopped the *run* only if it left documents unattempted. A cut that
+            # coincides with the last document ends a run in which every document was
+            # attempted, so nothing about it is early: carrying the reason there would claim a
+            # `not_reached` document that cannot exist, which `BatchSummary` rightly refuses.
+            remaining = documents[index + 1 :]
+            if remaining:
+                stopped = cut
+                items.extend(_not_reached(later) for later in remaining)
             break
 
     summary = _summarize(items, stopped)

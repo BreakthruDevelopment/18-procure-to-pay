@@ -1,0 +1,10 @@
+RHINE VALVE WORKS
+Accounts receivable
+Invoice No. 1005-A
+Invoice date: 2026-11-10
+Purchase order: PO-1005
+
+Qty  Description                          Unit price       Amount
+200  Brass gate valve, 1in                      3.00       600.00
+
+                         Total USD          600.00

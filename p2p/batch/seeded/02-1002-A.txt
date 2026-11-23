@@ -1,0 +1,10 @@
+NORTHWIND FASTENERS
+Accounts receivable
+Invoice No. 1002-A
+Invoice date: 2026-11-08
+Purchase order: PO-1002
+
+Qty  Description                          Unit price       Amount
+50   Stainless washers, 25mm                   20.00     1,000.00
+
+                         Total USD          1,000.00

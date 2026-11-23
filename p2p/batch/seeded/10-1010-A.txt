@@ -1,0 +1,10 @@
+BRIGHTFIELD PACKAGING
+Accounts receivable
+Invoice No. 1010-A
+Invoice date: 2026-11-12
+Purchase order: PO-1010
+
+Qty  Description                          Unit price       Amount
+150  Corrugated carton, 400x300                 2.20       330.00
+
+                         Total USD          330.00

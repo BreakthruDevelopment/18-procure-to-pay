@@ -1,0 +1,10 @@
+BRIGHTFIELD PACKAGING
+Accounts receivable
+Invoice No. 1011-A
+Invoice date: 2026-11-13
+No purchase order is referenced on this invoice.
+
+Qty  Description                          Unit price       Amount
+40   Stretch wrap, 500mm                       11.00       440.00
+
+                         Total USD          440.00

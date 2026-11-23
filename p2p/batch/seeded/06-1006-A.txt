@@ -1,0 +1,11 @@
+RHINE VALVE WORKS
+Accounts receivable
+Invoice No. 1006-A
+Invoice date: 2026-11-10
+Purchase order: PO-1006
+
+Qty  Description                          Unit price       Amount
+5    Actuator, pneumatic                      100.00       500.00
+20   Valve seat kit                            15.00       300.00
+
+                         Total USD          800.00

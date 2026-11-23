@@ -45,7 +45,7 @@ packages = ["p2p"]
 "erp/seed.sql" = "p2p/_sql/seed.sql"
 
 [tool.hatch.build.targets.sdist]
-include = ["p2p", "erp", "tests", "README.md", "pyproject.toml", "uv.lock"]
+include = ["p2p", "erp", "tests", "scripts", "README.md", "pyproject.toml", "uv.lock"]
 
 [tool.ruff]
 line-length = 100

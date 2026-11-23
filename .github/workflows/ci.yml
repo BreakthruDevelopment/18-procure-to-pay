@@ -75,6 +75,7 @@ jobs:
         run: |
           /tmp/wheel-check/bin/p2p --version | tee smoke.out
           grep -q "^p2p 0.1.0$" smoke.out
+          PATH="/tmp/wheel-check/bin:$PATH" scripts/smoke.sh
 
   image:
     name: Container image

@@ -1,0 +1,14 @@
+{
+  "description": "Tiny recorded reply for GET /health. No ERP connection and no document text.",
+  "replies": [
+    {
+      "stop_reason": "end_turn",
+      "text": "ok",
+      "tool_uses": [],
+      "usage": {
+        "input_tokens": 1,
+        "output_tokens": 1
+      }
+    }
+  ]
+}

@@ -11,6 +11,7 @@ import pytest
 from p2p.cli import main
 from p2p.core.access import Principal, Role
 from p2p.core.erp import Erp
+from p2p.core.errors import ValidationFailed
 from p2p.demo.dump import record_replies
 from p2p.demo.fixtures import demo_fixture
 from p2p.demo.health import handler, health_payload
@@ -106,6 +107,49 @@ def test_health_opens_no_erp(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(Erp, "open", boom)
     assert health_payload()["replay"] == "ok"
+
+
+def test_health_reports_a_failed_round_trip_with_a_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure branch, which nothing exercised: `/health` is the whole live surface.
+
+    Without this, the round-trip could be deleted outright — or its branch flipped to
+    report `ok` — and the suite, lint and the post-deploy smoke would all still pass.
+    """
+    monkeypatch.delenv("APP_VERSION", raising=False)
+
+    def boom() -> None:
+        raise ValidationFailed("the health replay round-trip did not pass")
+
+    monkeypatch.setattr("p2p.demo.health.replay_round_trip", boom)
+
+    assert health_payload() == {"status": "error", "version": "0.1.0", "replay": "failed"}
+    response = handler({}, None)
+    assert response["statusCode"] == 500
+    body = json.loads(str(response["body"]))
+    assert body == {"status": "error", "version": "0.1.0", "replay": "failed"}
+
+
+def test_health_answers_rather_than_raising_on_a_short_recording(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """App 17's replay errors are not `P2PError`, so this used to escape as a crash.
+
+    A format-valid recording with no replies raises `ReplayExhausted`, which descends
+    from `RuntimeError`. `/health` must still answer with its documented body.
+    """
+    empty = tmp_path / "health.json"
+    empty.write_text('{"replies": []}\n', encoding="utf-8")
+
+    def fixture(name: str) -> Path:
+        del name
+        return empty
+
+    monkeypatch.setattr("p2p.demo.health.demo_fixture", fixture)
+
+    body = health_payload()
+    assert body["status"] == "error"
+    assert body["replay"] == "failed"
+    assert handler({}, None)["statusCode"] == 500
 
 
 def test_lambda_handler_returns_the_health_json() -> None:

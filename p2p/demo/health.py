@@ -3,6 +3,14 @@
 A first `Erp.open` applies schema and seed, which is a write, and Lambda's
 filesystem is read-only outside `/tmp`. This payload therefore talks only to
 app 17's recorder and replayer.
+
+**It answers, it never raises.** The round-trip's failures come from two
+exception trees: this app's `P2PError`, and app 17's `AgentContainerError` —
+`ReplayExhausted` and `ReplayFormatError` descend from `RuntimeError` and
+`ValueError`, not from `P2PError`, so catching only the latter let a short or
+malformed recording escape as an unhandled Lambda error instead of the
+documented `status: error` body with a 500. The live smoke reads that body, so
+a crash there is a deploy check that reports nothing.
 """
 
 from __future__ import annotations
@@ -12,6 +20,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from agent_container.core.errors import AgentContainerError
 from agent_container.core.messages import Message, ModelRequest
 from agent_container.core.replay import ReplayProvider
 
@@ -54,7 +63,7 @@ def health_payload(config: Config | None = None) -> dict[str, str]:
     """JSON object for `GET /health`. Never opens the ERP."""
     try:
         replay_round_trip()
-    except P2PError:
+    except (P2PError, AgentContainerError):
         return {
             "status": "error",
             "version": reported_version(config),

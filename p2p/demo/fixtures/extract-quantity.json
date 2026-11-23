@@ -1,0 +1,46 @@
+{
+  "description": "Recorded invoice-extract reply for INV-1002 (quantity-variance invoice 1002-A).",
+  "replies": [
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Northwind Fasteners",
+            "po_ref": "PO-1002",
+            "number": "1002-A",
+            "date": "2026-11-08",
+            "currency": "USD",
+            "total": 100000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Stainless washers, 25mm",
+                "qty": 50,
+                "unit_price": 2000,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    }
+  ]
+}

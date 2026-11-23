@@ -1,0 +1,941 @@
+{
+  "description": "Recorded extract and match replies for p2p batch over the seeded folder during the demo.",
+  "replies": [
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Northwind Fasteners",
+            "po_ref": "PO-1001",
+            "number": "1001-A",
+            "date": "2026-11-08",
+            "currency": "USD",
+            "total": 125000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "M8 hex bolts, zinc",
+                "qty": 100,
+                "unit_price": 1250,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Northwind Fasteners",
+            "po_ref": "PO-1002",
+            "number": "1002-A",
+            "date": "2026-11-08",
+            "currency": "USD",
+            "total": 100000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Stainless washers, 25mm",
+                "qty": 50,
+                "unit_price": 2000,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Calder Industrial",
+            "po_ref": "PO-1003",
+            "number": "1003-A",
+            "date": "2026-11-09",
+            "currency": "USD",
+            "total": 100000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Conveyor rollers",
+                "qty": 25,
+                "unit_price": 4000,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_purchase_order",
+          "name": "get_purchase_order",
+          "input": {
+            "po_id": "PO-1003"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_goods_receipt",
+          "name": "get_goods_receipt",
+          "input": {
+            "po_id": "PO-1003"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "variance",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": false,
+            "why": "variance",
+            "supplier_id": "SUP-1002",
+            "po_id": "PO-1003"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 900,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Calder Industrial",
+            "po_ref": "PO-1004",
+            "number": "1004-A",
+            "date": "2026-11-09",
+            "currency": "USD",
+            "total": 550000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Gearbox assembly, 4:1",
+                "qty": 10,
+                "unit_price": 55000,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_purchase_order",
+          "name": "get_purchase_order",
+          "input": {
+            "po_id": "PO-1004"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_goods_receipt",
+          "name": "get_goods_receipt",
+          "input": {
+            "po_id": "PO-1004"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "variance",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": false,
+            "why": "variance",
+            "supplier_id": "SUP-1002",
+            "po_id": "PO-1004"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 900,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Rhine Valve Works",
+            "po_ref": "PO-1005",
+            "number": "1005-A",
+            "date": "2026-11-10",
+            "currency": "USD",
+            "total": 60000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Brass gate valve, 1in",
+                "qty": 200,
+                "unit_price": 300,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_purchase_order",
+          "name": "get_purchase_order",
+          "input": {
+            "po_id": "PO-1005"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_goods_receipt",
+          "name": "get_goods_receipt",
+          "input": {
+            "po_id": "PO-1005"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "match",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": false,
+            "why": "match",
+            "supplier_id": "SUP-1003",
+            "po_id": "PO-1005"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 900,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Rhine Valve Works",
+            "po_ref": "PO-1006",
+            "number": "1006-A",
+            "date": "2026-11-10",
+            "currency": "USD",
+            "total": 80000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Actuator, pneumatic",
+                "qty": 5,
+                "unit_price": 10000,
+                "tax": 0
+              },
+              {
+                "line_no": 2,
+                "description": "Valve seat kit",
+                "qty": 20,
+                "unit_price": 1500,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_purchase_order",
+          "name": "get_purchase_order",
+          "input": {
+            "po_id": "PO-1006"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_goods_receipt",
+          "name": "get_goods_receipt",
+          "input": {
+            "po_id": "PO-1006"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "match",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": false,
+            "why": "match",
+            "supplier_id": "SUP-1003",
+            "po_id": "PO-1006"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 900,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Peakline Electrical",
+            "po_ref": "PO-1008",
+            "number": "1008-A",
+            "date": "2026-11-11",
+            "currency": "USD",
+            "total": 27000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Cable gland, M20",
+                "qty": 60,
+                "unit_price": 450,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_purchase_order",
+          "name": "get_purchase_order",
+          "input": {
+            "po_id": "PO-1008"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_goods_receipt",
+          "name": "get_goods_receipt",
+          "input": {
+            "po_id": "PO-1008"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "match",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": false,
+            "why": "match",
+            "supplier_id": "SUP-1004",
+            "po_id": "PO-1008"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 900,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Anselm Castings",
+            "po_ref": "PO-1009",
+            "number": "1009-A",
+            "date": "2026-11-12",
+            "currency": "USD",
+            "total": 200000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Cast housing, grey iron",
+                "qty": 8,
+                "unit_price": 25000,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_purchase_order",
+          "name": "get_purchase_order",
+          "input": {
+            "po_id": "PO-1009"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_goods_receipt",
+          "name": "get_goods_receipt",
+          "input": {
+            "po_id": "PO-1009"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "match",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": false,
+            "why": "match",
+            "supplier_id": "SUP-1005",
+            "po_id": "PO-1009"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 900,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Brightfield Packaging",
+            "po_ref": "PO-1010",
+            "number": "1010-A",
+            "date": "2026-11-12",
+            "currency": "USD",
+            "total": 33000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Corrugated carton, 400x300",
+                "qty": 150,
+                "unit_price": 220,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_purchase_order",
+          "name": "get_purchase_order",
+          "input": {
+            "po_id": "PO-1010"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_goods_receipt",
+          "name": "get_goods_receipt",
+          "input": {
+            "po_id": "PO-1010"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "match",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": false,
+            "why": "match",
+            "supplier_id": "SUP-1006",
+            "po_id": "PO-1010"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 900,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Brightfield Packaging",
+            "po_ref": null,
+            "number": "1011-A",
+            "date": "2026-11-13",
+            "currency": "USD",
+            "total": 44000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Stretch wrap, 500mm",
+                "qty": 40,
+                "unit_price": 1100,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "no_po",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": true,
+            "why": "no_po",
+            "supplier_id": "SUP-1006"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 900,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "extract",
+          "name": "invoice_draft",
+          "input": {
+            "supplier_name": "Northwind Fasteners",
+            "po_ref": "PO-1012",
+            "number": "1012-A",
+            "date": "2026-11-13",
+            "currency": "USD",
+            "total": 99000,
+            "lines": [
+              {
+                "line_no": 1,
+                "description": "Threaded rod, M12",
+                "qty": 30,
+                "unit_price": 3300,
+                "tax": 0
+              }
+            ],
+            "confidence": {
+              "supplier_name": 0.99,
+              "po_ref": 0.99,
+              "number": 0.99,
+              "date": 0.99,
+              "currency": 0.99,
+              "total": 0.99,
+              "lines": 0.99
+            },
+            "unreadable": []
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 120
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_purchase_order",
+          "name": "get_purchase_order",
+          "input": {
+            "po_id": "PO-1012"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "get_goods_receipt",
+          "name": "get_goods_receipt",
+          "input": {
+            "po_id": "PO-1012"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "decide",
+          "name": "match_outcome",
+          "input": {
+            "verdict": "match",
+            "variances": [],
+            "confidence": 0.99,
+            "needs_human": false,
+            "why": "match",
+            "supplier_id": "SUP-1001",
+            "po_id": "PO-1012"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 900,
+        "output_tokens": 40
+      }
+    }
+  ]
+}

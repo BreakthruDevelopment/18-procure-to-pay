@@ -1,0 +1,90 @@
+{
+  "description": "Four dispute-triage steps on DC-0001 ending in a 4,000 credit that escalates.",
+  "replies": [
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "t1",
+          "name": "dispute_step",
+          "input": {
+            "next_action": "read_invoice",
+            "tool_choice": "get_invoice",
+            "draft_reply": "Looking up the billed invoice.",
+            "question": null,
+            "invoice_id": "INV-1013"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 600,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "t1",
+          "name": "dispute_step",
+          "input": {
+            "next_action": "ask_question",
+            "tool_choice": null,
+            "draft_reply": "Need a fact before acting.",
+            "question": "What quantity was received against this invoice?"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 600,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "t1",
+          "name": "dispute_step",
+          "input": {
+            "next_action": "read_supplier",
+            "tool_choice": "find_supplier",
+            "draft_reply": "Checking the supplier record.",
+            "question": null,
+            "supplier_name": "Rhine Valve Works"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 600,
+        "output_tokens": 40
+      }
+    },
+    {
+      "stop_reason": "tool_use",
+      "text": "",
+      "tool_uses": [
+        {
+          "id": "t1",
+          "name": "dispute_step",
+          "input": {
+            "next_action": "propose_credit",
+            "tool_choice": "issue_credit_memo",
+            "draft_reply": "Proposing the credit the supplier asked for.",
+            "question": null,
+            "amount": 400000,
+            "currency": "USD",
+            "reason": "supplier claim"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 600,
+        "output_tokens": 40
+      }
+    }
+  ]
+}

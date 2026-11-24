@@ -96,3 +96,58 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Run the CLI in the image
         run: docker run --rm p2p:ci --version | grep -q "^p2p 0.1.0$"
+
+  lambda:
+    name: Lambda image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the Lambda image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: lambda
+          push: false
+          load: true
+          tags: p2p-lambda:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # Built for this runner's architecture on purpose: what is under test here is the image's
+      # entry point, its CMD and the packaged files, none of which differ by architecture. The
+      # arm64 build that Lambda actually runs is asserted in `publish.yml`, against the registry.
+      - name: The image answers through the Lambda runtime, with the injected APP_VERSION
+        # The AWS base image ships the runtime interface emulator, so this is the real runtime
+        # resolving the real CMD. It fails if the CMD names nothing, if the wheel is missing the
+        # ERP schema or the recorded health reply, or if APP_VERSION stops reaching the payload —
+        # the last of which is what the live smoke compares the deployed tag against.
+        run: |
+          docker run -d --name p2p-lambda -p 9000:8080 -e APP_VERSION=sha-ci p2p-lambda:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS -XPOST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+                 -d '{}' -o /tmp/invocation.json --max-time 20; then break; fi
+            sleep 2
+          done
+          # Without this the next step reads a missing file and fails on a traceback instead of
+          # saying that the function never answered at all.
+          test -s /tmp/invocation.json || { docker logs p2p-lambda; echo "the function never answered"; exit 1; }
+          echo "--- container logs ---"
+          docker logs p2p-lambda
+          echo "--- invocation ---"
+          cat /tmp/invocation.json
+          python3 - <<'PY'
+          import json, pathlib, sys
+
+          raw = pathlib.Path("/tmp/invocation.json").read_text(encoding="utf-8")
+          response = json.loads(raw)
+          if response.get("statusCode") != 200:
+              sys.exit(f"the function did not answer 200: {raw}")
+          body = json.loads(response["body"])
+          for key, expected in (("status", "ok"), ("replay", "ok"), ("version", "sha-ci")):
+              if body.get(key) != expected:
+                  sys.exit(f"{key} was {body.get(key)!r}, expected {expected!r}: {raw}")
+          print("the Lambda image answers /health: ok, replay ok, version sha-ci")
+          PY
+      - if: always()
+        run: docker rm -f p2p-lambda

@@ -70,12 +70,30 @@ jobs:
       - name: The pushed tag is anonymously pullable and is linux/arm64
         # Exactly what deploy/aws.sh can do: no credentials for this registry. `docker logout`
         # drops the login above, so an unauthenticated inspect is what runs. A private package or
-        # a non-arm64 manifest fails here, in this repo, instead of inside the AWS deployer where
+        # a non-arm64 image fails here, in this repo, instead of inside the AWS deployer where
         # only the account owner can read the error.
+        #
+        # The platform is read from the image CONFIG, not from a manifest listing. The push above
+        # is a single plain manifest (one platform, provenance and sbom off), and for that shape
+        # `imagetools inspect` prints only Name, MediaType and Digest -- no Platform line -- so
+        # grepping its default output for `linux/arm64` could never pass, however correct the
+        # image. `{{json .Image}}` is the config either way: the config object for a single
+        # platform, a map of platform to config for an index, and both shapes are handled below.
         run: |
           docker logout ghcr.io
           tag='${{ steps.meta.outputs.tags }}'
           echo "inspecting ${tag} anonymously"
-          docker buildx imagetools inspect "$tag" | tee /tmp/manifest.txt
-          grep -q 'linux/arm64' /tmp/manifest.txt
+          docker buildx imagetools inspect --format '{{json .Image}}' "$tag" \
+            | tee /tmp/image-config.json
+          python3 - <<'PY'
+          import json, pathlib, sys
+
+          raw = pathlib.Path("/tmp/image-config.json").read_text(encoding="utf-8")
+          document = json.loads(raw)
+          configs = [document] if "architecture" in document else list(document.values())
+          platforms = {f"{c.get('os')}/{c.get('architecture')}" for c in configs}
+          if platforms != {"linux/arm64"}:
+              sys.exit(f"the pushed tag is {sorted(platforms)}, expected exactly linux/arm64: {raw}")
+          print("the pushed tag is anonymously pullable and linux/arm64 only")
+          PY
           echo "::notice::${tag} is public and linux/arm64; apps.yaml may name this tag"
